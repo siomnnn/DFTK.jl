@@ -17,7 +17,7 @@ struct FiniteElementBasis{T,
 
     ## FEM basis information
     h::T  # Target grid spacing in real space.
-    grid::Grid  # Real-space grid from Ferrite.
+    discretization::FEMDiscretization{T}  # Real-space finite element discretization of the unit cell.
 
     ## Information on the hardware and device used for computations.
     architecture::Arch
@@ -29,17 +29,18 @@ end
 # Lowest-level constructor. Only call if you know what you're doing.
 function FiniteElementBasis(model::Model{T, VT},
                             h::T,
-                            grid::Grid,
+                            discretization::FEMDiscretization{T},
                             architecture::Arch,
                            ) where {T, VT, Arch}
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
-    basis = FiniteElementBasis{T, VT, Arch}(model, grid, h, architecture, terms)
+    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), discretization, architecture, terms)
 
-    for (it, t) in enumerate(model.term_types)
-        term_name = string(nameof(typeof(t)))
-        @timing "Instantiation $term_name" basis.terms[it] = t(basis)
-    end
+    # TODO: make terms work
+    #for (it, t) in enumerate(model.term_types)
+    #    term_name = string(nameof(typeof(t)))
+    #    @timing "Instantiation $term_name" basis.terms[it] = t(basis)
+    #end
     basis
 end
 
@@ -47,13 +48,17 @@ end
 Creates a `FiniteElementBasis` using the mesh width `h` and a Ferrite `Grid` object.
 
 If `grid` is not provided, a grid is constructed using the `construct_FEM_grid` function.
-This is slow if if many calculations are done using the same model and mesh width. In order
-to speed things up, it is recommended to either pre-generate the grid using `construct_FEM_grid`
-or by setting `keep_grid=true` to save the grid to the file in `filename`. Then, load the
-saved grid using the alternative constructor.
+This is unnecessarily slow if many calculations are done using the same model and mesh width.
+In order to speed things up, it is recommended to pre-generate the grid either using
+`construct_FEM_grid` or by setting `write_to_file=true` to save the grid to `filename`
+(by default `mesh.msh`). Then, load the saved grid using `load_grid_from_file`.
+
+Note that such a mesh file requires a rather specific labeling of the periodic faces,
+so this function is not compatible with arbitrary meshes.
 """
-@timing function PlaneWaveBasis(model::Model{T};
+@timing function FiniteElementBasis(model::Model{T};
                                 h::T,
+                                degree::Int=1,
                                 grid=nothing,
                                 write_to_file=false,
                                 filename="mesh.msh",
@@ -65,23 +70,9 @@ saved grid using the alternative constructor.
         grid = construct_FEM_grid(model, austrip(h); write_to_file=write_to_file, filename=filename)
     end
 
-    FiniteElementBasis(model, austrip(h), grid, architecture)
-end
+    discretization = FEMDiscretization(model.lattice, grid; degree)
 
-@doc raw"""
-Creates a `FiniteElementBasis` using the mesh width `h` and a `.msh` file located at `filename`.
-
-This function is preferred when a grid has already been generated and saved to a file.
-It is faster than the other constructor, as it does not need to generate the grid from scratch.
-"""
-@timing function PlaneWaveBasis(model::Model{T};
-                                h::T,
-                                filename::String,
-                                architecture=CPU()
-                               ) where {T <: Real}
-    grid = FerriteGmsh.togrid(filename, domain="")
-
-    FiniteElementBasis(model, austrip(h), grid, architecture)
+    FiniteElementBasis(model, austrip(h), discretization, architecture)
 end
 
 # prevent broadcast
@@ -90,17 +81,17 @@ Base.Broadcast.broadcastable(basis::FiniteElementBasis) = Ref(basis)
 Base.eltype(::FiniteElementBasis{T}) where {T} = T
 
 @doc raw"""
-Constructs a Ferrite grid object from a `Model` and a mesh width `h`.
-Can be saved in Gmsh `.msh` format for later use by setting `write_to_file=true` and providing a `filename`.
+Constructs a Ferrite grid object from a `Model` and a mesh width `h`. Can be saved
+in Gmsh `.msh` format for later use by setting `write_to_file=true` and providing a `filename`.
 """
 function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename="mesh.msh") where T
     # TODO: this is incredibly ugly, find a better way to do this
     lattice = model.lattice
-    if size(lattice, 2) != 3
-        error("Lattice must be 3-dimensional.")
-    end
+    h = austrip(h)
 
     gmsh.initialize()
+
+    # Suppress terminal output
     gmsh.option.setNumber("General.Terminal",0)
 
     gmsh.model.add("unit_cell")
@@ -123,22 +114,30 @@ function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename
     gmsh.model.geo.synchronize()
     gmsh.model.addPhysicalGroup(3, [1], 1, "unit_cell")
 
-    # Specify periodicity
-    translation = [1, 0, 0, lattice[1, 3],
-                   0, 1, 0, lattice[2, 3],
-                   0, 0, 1, lattice[3, 3],
-                   0, 0, 0, 1]
-    gmsh.model.mesh.setPeriodic(2, [32], [10], translation)
-    translation = [1, 0, 0, lattice[1, 2],
-                   0, 1, 0, lattice[2, 2],
-                   0, 0, 1, lattice[3, 2],
-                   0, 0, 0, 1]
-    gmsh.model.mesh.setPeriodic(2, [27], [19], translation)
+    # Label periodic faces
+    gmsh.model.addPhysicalGroup(2, [23], -1, "periodic_1a")
+    gmsh.model.addPhysicalGroup(2, [31], -1, "periodic_1b")
+    gmsh.model.addPhysicalGroup(2, [27], -1, "periodic_2a")
+    gmsh.model.addPhysicalGroup(2, [19], -1, "periodic_2b")
+    gmsh.model.addPhysicalGroup(2, [32], -1, "periodic_3a")
+    gmsh.model.addPhysicalGroup(2, [10], -1, "periodic_3b")
+
+    # Specify mesh periodicity
     translation = [1, 0, 0, lattice[1, 1],
                    0, 1, 0, lattice[2, 1],
                    0, 0, 1, lattice[3, 1],
                    0, 0, 0, 1]
     gmsh.model.mesh.setPeriodic(2, [23], [31], translation)
+    translation = [1, 0, 0, lattice[1, 2],
+                   0, 1, 0, lattice[2, 2],
+                   0, 0, 1, lattice[3, 2],
+                   0, 0, 0, 1]
+    gmsh.model.mesh.setPeriodic(2, [27], [19], translation)
+    translation = [1, 0, 0, lattice[1, 3],
+                   0, 1, 0, lattice[2, 3],
+                   0, 0, 1, lattice[3, 3],
+                   0, 0, 0, 1]
+    gmsh.model.mesh.setPeriodic(2, [32], [10], translation)
 
     # Generate mesh
     gmsh.model.mesh.generate(3)
@@ -148,9 +147,14 @@ function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename
     end
 
     # Convert to Ferrite Grid
-    grid = FerriteGmsh.togrid(filename, domain="unit_cell")
+    grid = togrid(; domain="unit_cell")
 
     gmsh.finalize()
 
+    return grid
+end
+
+function load_grid_from_file(filename::String)
+    grid = togrid(filename)
     return grid
 end
