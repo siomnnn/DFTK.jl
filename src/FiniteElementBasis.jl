@@ -4,8 +4,6 @@ using Gmsh: gmsh
 
 @doc raw"""
 A finite-element discretized `Model`.
-Normalization conventions:
-- Quantities expressed on the real-space grid are in actual values.
 """
 struct FiniteElementBasis{T,
                       VT <: Real,
@@ -17,6 +15,7 @@ struct FiniteElementBasis{T,
 
     ## FEM basis information
     h::T  # Target grid spacing in real space.
+    degree::Int  # Polynomial degree of the finite element basis functions.
     discretization::FEMDiscretization{T}  # Real-space finite element discretization of the unit cell.
 
     ## Information on the hardware and device used for computations.
@@ -29,12 +28,13 @@ end
 # Lowest-level constructor. Only call if you know what you're doing.
 function FiniteElementBasis(model::Model{T, VT},
                             h::T,
+                            degree::Int,
                             discretization::FEMDiscretization{T},
                             architecture::Arch,
                            ) where {T, VT, Arch}
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
-    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), discretization, architecture, terms)
+    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization, architecture, terms)
 
     # TODO: make terms work
     #for (it, t) in enumerate(model.term_types)
@@ -72,7 +72,7 @@ so this function is not compatible with arbitrary meshes.
 
     discretization = FEMDiscretization(model.lattice, grid; degree)
 
-    FiniteElementBasis(model, austrip(h), discretization, architecture)
+    FiniteElementBasis(model, austrip(h), degree, discretization, architecture)
 end
 
 # prevent broadcast
