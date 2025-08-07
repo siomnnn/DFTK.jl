@@ -55,6 +55,8 @@ In order to speed things up, it is recommended to pre-generate the grid either u
 
 Note that such a mesh file requires a rather specific labeling of the periodic faces,
 so this function is not compatible with arbitrary meshes.
+
+Only 3D meshes are currently supported.
 """
 @timing function FiniteElementBasis(model::Model{T};
                                 h::T,
@@ -110,7 +112,7 @@ function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename
     gmsh.model.geo.addPlaneSurface([9], 10)
 
     # Extrude to volume
-    gmsh.model.geo.extrude([2, 10], lattice[:, 3]...)
+    gmsh.model.geo.extrude([(2, 10)], lattice[:, 3]...)
     gmsh.model.geo.synchronize()
     gmsh.model.addPhysicalGroup(3, [1], 1, "unit_cell")
 
@@ -142,12 +144,19 @@ function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename
     # Generate mesh
     gmsh.model.mesh.generate(3)
     
+    # Convert to Ferrite Grid. The temporary file in the else part is necessary
+    # due to a FerriteGmsh bug which messes up the boundary tags when converting
+    # directly from the current Gmsh state (even though there is a function for that).
     if write_to_file
         gmsh.write(filename)
+        grid = togrid(filename; domain="unit_cell")
+    else
+        grid = mktempdir() do dir
+            path = joinpath(dir, "mesh.msh")
+            gmsh.write(path)
+            togrid(path; domain="unit_cell")
+        end
     end
-
-    # Convert to Ferrite Grid
-    grid = togrid(; domain="unit_cell")
 
     gmsh.finalize()
 
@@ -155,6 +164,11 @@ function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename
 end
 
 function load_grid_from_file(filename::String)
-    grid = togrid(filename)
+    grid = togrid(filename; domain="unit_cell")
     return grid
 end
+
+getndofs(basis::FiniteElementBasis) = basis.discretization.dof_handler.ndofs
+getdofhandler(basis::FiniteElementBasis) = basis.discretization.dof_handler
+getconstrainthandler(basis::FiniteElementBasis) = basis.discretization.constraint_handler
+getcellvalues(basis::FiniteElementBasis) = basis.discretization.cell_values
