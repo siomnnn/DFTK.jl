@@ -1,6 +1,7 @@
 using DftFunctionals
 
 include("operators.jl")
+include("fem_operators.jl")
 
 ### Terms
 # - A Term is something that, given a state, returns a named tuple (; E, hams) with an energy
