@@ -12,25 +12,19 @@ They also implement `mul!` and `Matrix(op)` for exploratory use.
 abstract type FEMOperator end
 # FEMOperator currently only contain a field `basis`, as `kpoint`s are not yet implemented for FEM.
 
-#function LinearAlgebra.mul!(Hψ::AbstractVector, op::FEMOperator, ψ::AbstractVector)
-#    ψ_real = ifft(op.basis, op.kpoint, ψ)
-#    Hψ_fourier = similar(ψ)
-#    Hψ_real = similar(ψ_real)
-#    Hψ_fourier .= 0
-#    Hψ_real .= 0
-#    apply!((; real=Hψ_real, fourier=Hψ_fourier),
-#           op,
-#           (; real=ψ_real, fourier=ψ))
-#    Hψ .= Hψ_fourier .+ fft(op.basis, op.kpoint, Hψ_real)
-#    Hψ
-#end
-#function LinearAlgebra.mul!(Hψ::AbstractMatrix, op::FEMOperator, ψ::AbstractMatrix)
-#    @views for i = 1:size(ψ, 2)
-#        mul!(Hψ[:, i], op, ψ[:, i])
-#    end
-#    Hψ
-#end
-#Base.:*(op::RealFourierOperator, ψ) = mul!(similar(ψ), op, ψ)
+function LinearAlgebra.mul!(Hψ::AbstractVector, op::FEMOperator, ψ::AbstractVector)
+    # Only real-space transformations are possible with finite elements,
+    # so there is no Fourier component.
+    apply!(Hψ, op, ψ)
+    Hψ
+end
+function LinearAlgebra.mul!(Hψ::AbstractMatrix, op::FEMOperator, ψ::AbstractMatrix)
+    @views for i = 1:size(ψ, 2)
+        mul!(Hψ[:, i], op, ψ[:, i])
+    end
+    Hψ
+end
+Base.:*(op::FEMOperator, ψ) = mul!(similar(ψ), op, ψ)
 
 """
 Noop operation: don't do anything.
@@ -45,10 +39,15 @@ function Matrix(op::NoopFEMOperator)
     zeros(eltype(op.basis), n_dofs, n_dofs)
 end
 
+# Contrary to the Fourier space version, we need to take into account that the
+# FEM basis functions are not orthonormal, so we cannot just multiply by the potential.
+# At the same time, constructing the full matrix is unnecessarily expensive and not
+# needed for diagonalization or energy computation. Instead, we only compute the
+# "matrix elements" <ϕ_i|V|ψ> using the Ferrite features designed for FEM load vector assembly.
 """
 Real space multiplication by a potential:
 ```math
-(Hψ)(r) = V(r) ψ(r).
+(Hψ)_i = <ϕ_i|V|ψ>.
 ```
 """
 struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
@@ -56,7 +55,32 @@ struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     potential::AT
 end
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    Hψ .+= op.potential .* ψ
+    dof_handler = getdofhandler(op.basis)
+    cell_values = getcellvalues(op.basis)
+    out = zeros(eltype(op.basis), ndofs(dof_handler))
+
+    n_basefuncs = getnbasefunctions(cell_values)
+    fe = zeros(n_basefuncs)
+
+    # all of these remain constant when reinit-ing cell_values in the case of a Lagrange basis
+    n_quad = getnquadpoints(cell_values)
+    ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
+
+    for cell in CellIterator(dof_handler)
+        reinit!(cell_values, cell)
+        fill!(fe, 0)
+
+        pot_interpol = ϕ_evals * op.potential[celldofs(cell)]
+        ψ_interpol = ϕ_evals * ψ[celldofs(cell)]
+        dΩ = getdetJdV.([cell_values], 1:n_quad)
+        
+        for i in 1:n_basefuncs
+            fe[i] += (ϕ_evals[:, i] .* ψ_interpol .* pot_interpol)' * dΩ
+        end
+    
+        assemble!(out, celldofs(cell), fe)
+    end
+    Hψ .+= out
 end
 function Matrix(op::FEMRealSpaceMultiplication)
     # V(ϕ1, ϕ2) = <ϕ1|V|ϕ2> = ∫ conj(ϕ1(r)) V(r) ϕ2(r) dr
@@ -71,34 +95,25 @@ function Matrix(op::FEMRealSpaceMultiplication)
     
     assembler = start_assemble(H)
 
+    # all of these remain constant when reinit-ing cell_values in the case of a Lagrange basis
+    n_quad = getnquadpoints(cell_values)
+    ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
+
     # TODO: is parallelization possible even though we are reinit-ing cell_values?
     for cell in CellIterator(dof_handler)
         reinit!(cell_values, cell)
+        fill!(Ke, 0)
 
-        assemble_element!(Ke, cell_values, op.potential[celldofs(cell)])
+        pot_interpol = ϕ_evals * op.potential[celldofs(cell)]
+        dΩ = getdetJdV.([cell_values], 1:n_quad)
+
+        for i in 1:n_basefuncs, j in 1:n_basefuncs
+            Ke[i, j] += (ϕ_evals[:, i] .* ϕ_evals[:, j] .* pot_interpol)' * dΩ
+        end
     
         assemble!(assembler, celldofs(cell), Ke)
     end
     H
-end
-
-function assemble_element!(Ke, cv, potential)
-    n_basefuncs = getnbasefunctions(cv)
-    fill!(Ke, 0)
-
-    n_quad = getnquadpoints(cv)
-    ϕ_evals = shape_value.([cv], 1:n_quad, (1:n_basefuncs)')
-    pot_interpol = ϕ_evals * potential
-
-    # TODO: maybe vectorize
-    for q_point in 1:n_quad
-        dΩ = getdetJdV(cv, q_point)
-
-        for i in 1:n_basefuncs, j in 1:n_basefuncs
-            Ke[i, j] += pot_interpol[q_point] * ϕ_evals[q_point, i] * ϕ_evals[q_point, j] * dΩ
-        end
-    end
-    return Ke
 end
 
 #"""
@@ -118,25 +133,16 @@ end
 #end
 #Matrix(op::NonlocalOperator) = op.P * op.D * op.P'
 #
-#@doc raw"""
-#Nonlocal "divAgrad" operator ``-½ ∇ ⋅ (A ∇)`` where ``A`` is a scalar field on the
-#real-space grid. The ``-½`` is included, such that this operator is a generalisation of the
-#kinetic energy operator (which is obtained for ``A=1``).
-#"""
-#struct DivAgradOperator{T <: Real, AT} <: RealFourierOperator
-#    basis::PlaneWaveBasis{T}
-#    kpoint::Kpoint{T}
-#    A::AT
-#end
-#function apply!(Hψ, op::DivAgradOperator, ψ;
-#                ψ_scratch=zeros(complex(eltype(op.basis)), op.basis.fft_size...))
-#    # TODO: Performance improvements: Unscaled plans, avoid remaining allocations
-#    #       (which are only on the small k-point-specific Fourier grid
-#    G_plus_k = [[p[α] for p in Gplusk_vectors_cart(op.basis, op.kpoint)] for α = 1:3]
-#    for α = 1:3
-#        ∂αψ_real = ifft!(ψ_scratch, op.basis, op.kpoint, im .* G_plus_k[α] .* ψ.fourier)
-#        A∇ψ      = fft(op.basis, op.kpoint, ∂αψ_real .* op.A)
-#        Hψ.fourier .-= im .* G_plus_k[α] .* A∇ψ ./ 2
-#    end
-#end
-## TODO Implement  Matrix(op::DivAgrad)
+@doc raw"""
+Laplacian operator with the usual prefactor of -1/2, i.e.
+```math
+(Hψ)_i = <ϕ_i|-1/2 Δ|ψ>.
+```
+"""
+struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
+    basis::FiniteElementBasis{T}
+end
+function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ;
+                ψ_scratch=zeros(complex(eltype(op.basis)), getndofs(op.basis)))
+
+end

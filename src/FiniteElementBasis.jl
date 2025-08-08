@@ -18,6 +18,9 @@ struct FiniteElementBasis{T,
     degree::Int  # Polynomial degree of the finite element basis functions.
     discretization::FEMDiscretization{T}  # Real-space finite element discretization of the unit cell.
 
+    overlap_matrix::AbstractMatrix{T}
+
+
     ## Information on the hardware and device used for computations.
     architecture::Arch
 
@@ -34,7 +37,9 @@ function FiniteElementBasis(model::Model{T, VT},
                            ) where {T, VT, Arch}
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
-    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization, architecture, terms)
+    overlap_matrix = init_overlap_matrix(discretization)
+
+    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization, overlap_matrix, architecture, terms)
 
     # TODO: make terms work
     #for (it, t) in enumerate(model.term_types)
@@ -172,3 +177,30 @@ getndofs(basis::FiniteElementBasis) = basis.discretization.dof_handler.ndofs
 getdofhandler(basis::FiniteElementBasis) = basis.discretization.dof_handler
 getconstrainthandler(basis::FiniteElementBasis) = basis.discretization.constraint_handler
 getcellvalues(basis::FiniteElementBasis) = basis.discretization.cell_values
+
+function init_overlap_matrix(disc::FEMDiscretization{T}) where T
+    H = allocate_matrix(disc.dof_handler, disc.constraint_handler)
+
+    n_basefuncs = getnbasefunctions(disc.cell_values)
+    Ke = zeros(complex(T), n_basefuncs, n_basefuncs)
+    
+    assembler = start_assemble(H)
+
+    n_quad = getnquadpoints(disc.cell_values)
+    ϕ_evals = shape_value.([disc.cell_values], 1:n_quad, (1:n_basefuncs)')
+
+    # TODO: is parallelization possible even though we are reinit-ing cell_values?
+    for cell in CellIterator(disc.dof_handler)
+        reinit!(disc.cell_values, cell)
+        fill!(Ke, 0)
+        
+        dΩ = getdetJdV.([disc.cell_values], 1:n_quad)
+        
+        for i in 1:n_basefuncs, j in 1:n_basefuncs
+            Ke[i, j] += (ϕ_evals[:, i] .* ϕ_evals[:, j])' * dΩ
+        end
+    
+        assemble!(assembler, celldofs(cell), Ke)
+    end
+    H
+end
