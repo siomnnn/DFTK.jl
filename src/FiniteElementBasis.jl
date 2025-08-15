@@ -19,7 +19,8 @@ struct FiniteElementBasis{T,
     discretization::FEMDiscretization{T}  # Real-space finite element discretization of the unit cell.
 
     overlap_matrix::AbstractMatrix{T}
-
+    neg_half_laplacian::Union{AbstractMatrix{T}, Nothing}   # Matrix representation of the negative half Laplacian operator.
+                                                            # Precomputation can be turned off in the constructor.
 
     ## Information on the hardware and device used for computations.
     architecture::Arch
@@ -33,13 +34,19 @@ function FiniteElementBasis(model::Model{T, VT},
                             h::T,
                             degree::Int,
                             discretization::FEMDiscretization{T},
+                            precompute_laplacian::Bool,
                             architecture::Arch,
                            ) where {T, VT, Arch}
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
     overlap_matrix = init_overlap_matrix(discretization)
 
-    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization, overlap_matrix, architecture, terms)
+    neg_half_laplacian = nothing
+    if precompute_laplacian
+        neg_half_laplacian = init_neg_half_laplace_matrix(discretization)
+    end
+
+    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization, overlap_matrix, neg_half_laplacian, architecture, terms)
 
     # TODO: make terms work
     #for (it, t) in enumerate(model.term_types)
@@ -59,27 +66,28 @@ In order to speed things up, it is recommended to pre-generate the grid either u
 (by default `mesh.msh`). Then, load the saved grid using `load_grid_from_file`.
 
 Note that such a mesh file requires a rather specific labeling of the periodic faces,
-so this function is not compatible with arbitrary meshes.
+so this function is not compatible with arbitrary meshes. Only 3D meshes are currently supported.
 
-Only 3D meshes are currently supported.
+By default, the matrix representation of the Laplacian operator is precomputed. This can be
+disabled by setting `precompute_laplacian=false`.
 """
 @timing function FiniteElementBasis(model::Model{T};
-                                h::T,
-                                degree::Int=1,
-                                grid=nothing,
-                                write_to_file=false,
-                                filename="mesh.msh",
-                                architecture=CPU()
-                               ) where {T <: Real}
+                                    h::T,
+                                    degree::Int=1,
+                                    grid=nothing,
+                                    precompute_laplacian=true,
+                                    architecture=CPU(),
+                                    write_to_file=false,
+                                    filename="mesh.msh"
+                                   ) where {T <: Real}
     @assert grid isa Union{Nothing, Grid} "grid must be a Ferrite Grid or nothing"
 
     if isnothing(grid)
         grid = construct_FEM_grid(model, austrip(h); write_to_file=write_to_file, filename=filename)
     end
-
     discretization = FEMDiscretization(model.lattice, grid; degree)
 
-    FiniteElementBasis(model, austrip(h), degree, discretization, architecture)
+    FiniteElementBasis(model, austrip(h), degree, discretization, precompute_laplacian, architecture)
 end
 
 # prevent broadcast
@@ -178,6 +186,8 @@ getdofhandler(basis::FiniteElementBasis) = basis.discretization.dof_handler
 getconstrainthandler(basis::FiniteElementBasis) = basis.discretization.constraint_handler
 getcellvalues(basis::FiniteElementBasis) = basis.discretization.cell_values
 
+LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}) where T = dot(ψ, basis.overlap_matrix, ψ)^0.5
+
 function init_overlap_matrix(disc::FEMDiscretization{T}) where T
     H = allocate_matrix(disc.dof_handler, disc.constraint_handler)
 
@@ -202,5 +212,38 @@ function init_overlap_matrix(disc::FEMDiscretization{T}) where T
     
         assemble!(assembler, celldofs(cell), Ke)
     end
+
+    Ferrite.apply!(H, disc.constraint_handler)
+
     H
+end
+
+function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}) where T
+    neg_half_laplace = allocate_matrix(disc.dof_handler, disc.constraint_handler)
+
+    n_basefuncs = getnbasefunctions(disc.cell_values)
+    Ke = zeros(complex(T), n_basefuncs, n_basefuncs)
+    
+    assembler = start_assemble(neg_half_laplace)
+
+    n_quad = getnquadpoints(disc.cell_values)
+
+    # TODO: is parallelization possible even though we are reinit-ing cell_values?
+    for cell in CellIterator(disc.dof_handler)
+        reinit!(disc.cell_values, cell)
+        fill!(Ke, 0)
+        
+        ∇ϕ_evals = shape_gradient.([disc.cell_values], 1:n_quad, (1:n_basefuncs)')
+        dΩ = getdetJdV.([disc.cell_values], 1:n_quad)
+        
+        for i in 1:n_basefuncs, j in 1:n_basefuncs
+            Ke[i, j] += 0.5 * (∇ϕ_evals[:, i] .⋅ ∇ϕ_evals[:, j])' * dΩ
+        end
+    
+        assemble!(assembler, celldofs(cell), Ke)
+    end
+
+    Ferrite.apply!(neg_half_laplace, disc.constraint_handler)
+
+    neg_half_laplace
 end
