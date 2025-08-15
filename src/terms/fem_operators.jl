@@ -64,6 +64,9 @@ struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     potential::AT
 end
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
+    ψ_temp = copy(ψ)
+    Ferrite.apply!(ψ_temp, getconstrainthandler(op.basis))
+        
     dof_handler = getdofhandler(op.basis)
     cell_values = getcellvalues(op.basis)
     out = zeros(eltype(op.basis), ndofs(dof_handler))
@@ -80,7 +83,7 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
         fill!(fe, 0)
 
         pot_interpol = ϕ_evals * op.potential[celldofs(cell)]
-        ψ_interpol = ϕ_evals * ψ[celldofs(cell)]
+        ψ_interpol = ϕ_evals * ψ_temp[celldofs(cell)]
         dΩ = getdetJdV.([cell_values], 1:n_quad)
         
         for i in 1:n_basefuncs
@@ -91,7 +94,6 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
     end
 
     apply_bc!(out, getconstrainthandler(op.basis))
-    Ferrite.apply!(out, getconstrainthandler(op.basis))
 
     Hψ .+= out
 end
