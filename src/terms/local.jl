@@ -21,6 +21,45 @@ abstract type TermLocalPotential <: Term end
     (; E, ops)
 end
 
+@timing "ene_ops: FEM local" function ene_ops(term::TermLocalPotential,
+                                          basis::FiniteElementBasis{T}, ψ, occupation;
+                                          kwargs...) where {T}
+    ψ_pot = reduce_dofs(basis, term.potential_values)
+    ops = [FEMRealSpaceMultiplication(basis, ψ_pot)]
+
+    if :ρ in keys(kwargs)
+        ρ = copy(kwargs[:ρ])
+        @assert all(ρ[get_constraint_handler(basis, :ρ).prescribed_dofs] .== 0) ("ρ does not satisfy periodic boundary conditions. "
+                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
+                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
+        
+        dof_handler = get_dof_handler(basis, :ρ)
+        constraint_handler = get_constraint_handler(basis, :ρ)
+        cell_values = get_cell_values(basis, :ρ)
+
+        E = zero(T)
+        Ferrite.apply!(ρ, constraint_handler)
+        
+        n_basefuncs = getnbasefunctions(cell_values)
+        n_quad = getnquadpoints(cell_values)
+        ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
+        
+        for cell in CellIterator(dof_handler)
+            reinit!(cell_values, cell)
+        
+            pot_interpol = ϕ_evals * term.potential_values[celldofs(cell)]
+            ρ_interpol = ϕ_evals * ρ[celldofs(cell)]
+            dΩ = getdetJdV.([cell_values], 1:n_quad)
+
+            E += (pot_interpol .* ρ_interpol)' * dΩ
+        end
+    else
+        E = T(Inf)
+    end
+
+    (; E, ops)
+end
+
 ## External potentials
 
 struct TermExternal <: TermLocalPotential
@@ -38,6 +77,10 @@ function (external::ExternalFromValues)(basis::PlaneWaveBasis{T}) where {T}
     @assert size(external.potential_values) == basis.fft_size
     TermExternal(convert_dual.(T, external.potential_values))
 end
+function (external::ExternalFromValues)(basis::FiniteElementBasis{T}) where {T}
+    @assert length(external.potential_values) == get_n_dofs(basis, :ρ)
+    TermExternal(convert_dual.(T, external.potential_values))
+end
 
 """
 External potential from an analytic function `V` (in Cartesian coordinates).
@@ -46,9 +89,12 @@ No low-pass filtering is performed.
 struct ExternalFromReal
     potential::Function
 end
-
 function (external::ExternalFromReal)(basis::PlaneWaveBasis{T}) where {T}
     pot_real = external.potential.(r_vectors_cart(basis))
+    TermExternal(convert_dual.(T, pot_real))
+end
+function (external::ExternalFromReal)(basis::FiniteElementBasis{T}) where {T}
+    pot_real = external.potential.(get_dof_positions(basis, :ρ))
     TermExternal(convert_dual.(T, pot_real))
 end
 

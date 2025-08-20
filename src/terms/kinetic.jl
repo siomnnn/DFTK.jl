@@ -9,7 +9,9 @@ Base.@kwdef struct Kinetic{F}
     blowup::F = BlowupIdentity()  # Blow-up to smooth energy bands.
 end
 
-(kin::Kinetic)(basis) = TermKinetic(basis, kin.scaling_factor, kin.blowup)
+(kin::Kinetic)(basis::PlaneWaveBasis) = TermKinetic(basis, kin.scaling_factor, kin.blowup)
+(kin::Kinetic)(basis::FiniteElementBasis) = TermKineticFEM(basis, kin.scaling_factor, kin.blowup)
+
 function Base.show(io::IO, kin::Kinetic)
     bup = kin.blowup isa BlowupIdentity ? "" : ", blowup=$(kin.blowup)"
     fac = isone(kin.scaling_factor) ? "" : ", scaling_factor=$(kin.scaling_factor)"
@@ -37,6 +39,14 @@ function kinetic_energy(kin::Kinetic, Ecut, p)
     kinetic_energy(kin.blowup, kin.scaling_factor, Ecut, p)
 end
 
+struct TermKineticFEM <: Term
+    scaling_factor::Real
+end
+function TermKineticFEM(basis::FiniteElementBasis{T}, scaling_factor, blowup) where {T}
+    @assert blowup isa BlowupIdentity "FEM kinetic energy does not support blow-up functions yet"
+    TermKineticFEM(T(scaling_factor))
+end
+
 @timing "ene_ops: kinetic" function ene_ops(term::TermKinetic, basis::PlaneWaveBasis{T},
                                             ψ, occupation; kwargs...) where {T}
     ops = [FourierMultiplication(basis, kpoint, term.kinetic_energies[ik])
@@ -59,6 +69,25 @@ end
     (; E, ops)
 end
 
+@timing "ene_ops: FEM kinetic" function ene_ops(term::TermKineticFEM, basis::FiniteElementBasis{T},
+                                            ψ, occupation; kwargs...) where {T}
+    @assert all(ψ[get_constraint_handler(basis, :ψ).prescribed_dofs, :] .== 0) ("ψ does not satisfy periodic boundary conditions. "
+                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
+                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
+    ops = [NegHalfLaplaceFEMOperator(basis)]
+    if isnothing(ψ) || isnothing(occupation)
+        return (; E=T(Inf), ops)
+    end
+    occ = to_cpu(occupation)
+
+    E = zero(T)
+    for iband = 1:size(ψ, 2)
+        ψn = @views ψ[:, iband]
+        E += occ[iband] * real(dot(ψn, ops[1]*ψn))      # no faster way to do this unfortunately
+    end
+
+    (; E, ops)
+end
 
 """
 Default blow-up corresponding to the standard kinetic energies.

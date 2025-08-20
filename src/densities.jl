@@ -53,6 +53,57 @@ using an optional `occupation_threshold`. By default all occupation numbers are 
     ρ::AbstractArray{Tρ, 4}
 end
 
+@views @timing function compute_density(basis::FiniteElementBasis{T,VT}, ψ, occupation;
+                                        occupation_threshold=zero(T)) where {T,VT}
+
+    Tρ = promote_type(T, real(eltype(ψ[1])))
+
+    ψ_temp = deepcopy(ψ)
+    mask_occ = findall(occ -> abs(occ) ≥ occupation_threshold, occupation)
+
+    dof_handler_ψ = get_dof_handler(basis, :ψ)
+    dof_handler_ρ = get_dof_handler(basis, :ρ)
+    constraint_handler_ψ = get_constraint_handler(basis, :ψ)
+    constraint_handler_ρ = get_constraint_handler(basis, :ρ)
+    cell_values_ψ = get_cell_values(basis, :ψ)
+    cell_values_ρ = get_cell_values(basis, :ρ)
+
+    ip_ψ = Ferrite.getfieldinterpolation(dof_handler_ψ, Ferrite.find_field(dof_handler_ψ, :ψ))
+    ip_ρ = Ferrite.getfieldinterpolation(dof_handler_ρ, Ferrite.find_field(dof_handler_ρ, :ρ))
+    ref_coords_ρ = Ferrite.reference_coordinates(ip_ρ)
+
+    n_basefuncs_ψ = getnbasefunctions(cell_values_ψ)
+    n_basefuncs_ρ = getnbasefunctions(cell_values_ρ)
+    ref_evals_ψ = Ferrite.reference_shape_value.([ip_ψ], ref_coords_ρ, (1:n_basefuncs_ψ)')
+
+    for i in mask_occ
+        Ferrite.apply!(ψ_temp[:, i], constraint_handler_ψ)
+    end
+
+    ρ = zeros(Tρ, get_n_dofs(basis, :ρ))
+    for cell in CellIterator(dof_handler_ρ)
+        fe = zeros(Tρ, n_basefuncs_ρ)
+        reinit!(cell_values_ρ, cell)
+
+        for n in mask_occ
+            ψ_cell = ψ_temp[celldofs(dof_handler_ψ, cell.cellid), n]       # dof numberings of ψ and ρ don't match
+            ψ_evals = ref_evals_ψ * ψ_cell
+            fe += abs.(ψ_evals).^2
+        end
+
+        assemble!(ρ, celldofs(cell), fe)
+    end
+
+    remove_bc!(ρ, constraint_handler_ρ)
+
+    # There can always be small negative densities, e.g. due to numerical fluctuations
+    # in a vacuum region, so put some tolerance even if occupation_threshold == 0
+    negtol = max(sqrt(eps(T)), 10occupation_threshold)
+    minimum(ρ) < -negtol && @warn("Negative ρ detected", min_ρ=minimum(ρ))
+
+    ρ
+end
+
 # Variation in density corresponding to a variation in the orbitals and occupations.
 @views @timing function compute_δρ(basis::PlaneWaveBasis{T}, ψ, δψ, occupation,
                                    δoccupation=zero.(occupation);

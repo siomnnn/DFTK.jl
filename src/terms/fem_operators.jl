@@ -44,7 +44,7 @@ struct NoopFEMOperator{T <: Real} <: FEMOperator
 end
 apply!(Hψ, op::NoopFEMOperator, ψ) = nothing
 function Matrix(op::NoopFEMOperator)
-    n_dofs = getndofs(op.basis)
+    n_dofs = get_n_dofs(op.basis, :ψ)
     zeros(eltype(op.basis), n_dofs, n_dofs)
 end
 
@@ -56,7 +56,7 @@ end
 """
 Real space multiplication by a potential:
 ```math
-(Hψ)_i = <ϕ_i|V|ψ>.
+Hψ = |ϕ_i><ϕ_i|V|ψ>.
 ```
 """
 struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
@@ -64,12 +64,18 @@ struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     potential::AT
 end
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    ψ_temp = copy(ψ)
-    Ferrite.apply!(ψ_temp, getconstrainthandler(op.basis))
-        
-    dof_handler = getdofhandler(op.basis)
-    cell_values = getcellvalues(op.basis)
+    @assert all(ψ[get_constraint_handler(op.basis, :ψ).prescribed_dofs] .== 0) ("ψ does not satisfy periodic boundary conditions. "
+                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
+                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
+
+    dof_handler = get_dof_handler(op.basis, :ψ)
+    cell_values = get_cell_values(op.basis, :ψ)
+    constraint_handler = get_constraint_handler(op.basis, :ψ)
+
     out = zeros(eltype(op.basis), ndofs(dof_handler))
+
+    ψ_temp = copy(ψ)
+    Ferrite.apply!(ψ_temp, constraint_handler)
 
     n_basefuncs = getnbasefunctions(cell_values)
     fe = zeros(n_basefuncs)
@@ -93,15 +99,15 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
         assemble!(out, celldofs(cell), fe)
     end
 
-    apply_bc!(out, getconstrainthandler(op.basis))
+    apply_bc!(out, constraint_handler)
 
     Hψ .+= out
 end
 function Matrix(op::FEMRealSpaceMultiplication)
     # V(ϕ1, ϕ2) = <ϕ1|V|ϕ2> = ∫ conj(ϕ1(r)) V(r) ϕ2(r) dr
-    dof_handler = getdofhandler(op.basis)
-    constr_handler = getconstrainthandler(op.basis)
-    cell_values = getcellvalues(op.basis)
+    dof_handler = get_dof_handler(op.basis, :ψ)
+    constr_handler = get_constraint_handler(op.basis, :ψ)
+    cell_values = get_cell_values(op.basis, :ψ)
 
     H = allocate_matrix(dof_handler, constr_handler)
 
@@ -154,23 +160,28 @@ end
 @doc raw"""
 Laplacian operator with the usual prefactor of -1/2, i.e.
 ```math
-(Hψ)_i = <ϕ_i|-1/2 Δ|ψ>.
+Hψ = |ϕ_i><ϕ_i|-1/2 Δ|ψ>.
 ```
 """
 struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
     basis::FiniteElementBasis{T}
 end
 function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
-    if !isnothing(op.basis.neg_half_laplacian)
-        Hψ .+= op.basis.neg_half_laplacian * ψ
+    @assert all(ψ[get_constraint_handler(op.basis, :ψ).prescribed_dofs] .== 0) ("ψ does not satisfy periodic boundary conditions. "
+                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
+                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
+
+    laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)
+    if !isnothing(laplace_matrix)
+        Hψ .+= laplace_matrix * ψ
         return
     end
 
     ψ_temp = copy(ψ)
-    Ferrite.apply!(ψ_temp, getconstrainthandler(op.basis))
+    Ferrite.apply!(ψ_temp, get_constraint_handler(op.basis, :ψ))
 
-    dof_handler = getdofhandler(op.basis)
-    cell_values = getcellvalues(op.basis)
+    dof_handler = get_dof_handler(op.basis, :ψ)
+    cell_values = get_cell_values(op.basis, :ψ)
     out = zeros(eltype(op.basis), ndofs(dof_handler))
 
     n_basefuncs = getnbasefunctions(cell_values)
@@ -193,7 +204,7 @@ function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
         assemble!(out, celldofs(cell), fe)
     end
 
-    apply_bc!(out, getconstrainthandler(op.basis))
+    apply_bc!(out, get_constraint_handler(op.basis, :ψ))
 
     Hψ .+= out
     return
@@ -202,7 +213,7 @@ function Matrix(op::NegHalfLaplaceFEMOperator)
     if !isnothing(op.basis.neg_half_laplacian)
         return op.basis.neg_half_laplacian
     end
-    init_neg_half_laplace_matrix(op.basis.discretization)
+    init_neg_half_laplace_matrix(op.basis.discretization, :ψ)
 end    
 
 # The way Ferrite applies boundary conditions to vectors is not the way that we want it to.

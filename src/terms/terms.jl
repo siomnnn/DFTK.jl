@@ -39,6 +39,12 @@ function ene_ops(term::TermNoop, basis::PlaneWaveBasis{T}, ψ, occupation; kwarg
     (; E=zero(eltype(T)), ops=[NoopOperator(basis, kpt) for kpt in basis.kpoints])
 end
 
+struct TermNoopFEM <: Term end
+function ene_ops(term::TermNoopFEM, basis::FiniteElementBasis{T}, ψ, occupation; kwargs...) where {T}
+    (; E=zero(eltype(T)), ops=[NoopFEMOperator(basis)])
+    
+end
+
 include("Hamiltonian.jl")
 
 # breaks_symmetries on a term builder answers true if this term breaks
