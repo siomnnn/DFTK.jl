@@ -28,17 +28,12 @@ end
     ops = [FEMRealSpaceMultiplication(basis, ψ_pot)]
 
     if :ρ in keys(kwargs)
-        ρ = copy(kwargs[:ρ])
-        @assert all(ρ[get_constraint_handler(basis, :ρ).prescribed_dofs] .== 0) ("ρ does not satisfy periodic boundary conditions. "
-                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
-                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
-        
+        ρ = kwargs[:ρ]
         dof_handler = get_dof_handler(basis, :ρ)
         constraint_handler = get_constraint_handler(basis, :ρ)
         cell_values = get_cell_values(basis, :ρ)
 
         E = zero(T)
-        Ferrite.apply!(ρ, constraint_handler)
         
         n_basefuncs = getnbasefunctions(cell_values)
         n_quad = getnquadpoints(cell_values)
@@ -46,9 +41,11 @@ end
         
         for cell in CellIterator(dof_handler)
             reinit!(cell_values, cell)
+
+            periodic_cell_dofs = apply_inverse_constraint_map(basis, celldofs(cell), :ρ)
         
-            pot_interpol = ϕ_evals * term.potential_values[celldofs(cell)]
-            ρ_interpol = ϕ_evals * ρ[celldofs(cell)]
+            pot_interpol = ϕ_evals * term.potential_values[periodic_cell_dofs]
+            ρ_interpol = ϕ_evals * ρ[periodic_cell_dofs]
             dΩ = getdetJdV.([cell_values], 1:n_quad)
 
             E += (pot_interpol .* ρ_interpol)' * dΩ

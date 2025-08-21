@@ -58,7 +58,6 @@ end
 
     Tρ = promote_type(T, real(eltype(ψ[1])))
 
-    ψ_temp = deepcopy(ψ)
     mask_occ = findall(occ -> abs(occ) ≥ occupation_threshold, occupation)
 
     dof_handler_ψ = get_dof_handler(basis, :ψ)
@@ -76,11 +75,7 @@ end
     n_basefuncs_ρ = getnbasefunctions(cell_values_ρ)
     ref_evals_ψ = Ferrite.reference_shape_value.([ip_ψ], ref_coords_ρ, (1:n_basefuncs_ψ)')
 
-    for i in mask_occ
-        Ferrite.apply!(ψ_temp[:, i], constraint_handler_ψ)
-    end
-
-    ρ = zeros(Tρ, get_n_dofs(basis, :ρ))
+    ρ = zeros(Tρ, get_n_free_dofs(basis, :ρ))
     for n in mask_occ
         ψ_fine = zeros(Tρ, get_n_dofs(basis, :ρ))
         fe = zeros(Tρ, n_basefuncs_ρ)
@@ -89,15 +84,14 @@ end
             reinit!(cell_values_ρ, cell)
             fill!(fe, 0)
 
-            ψ_cell = ψ_temp[celldofs(dof_handler_ψ, cell.cellid), n]        # dof numberings of ψ and ρ don't match
+            ψ_cell = ψ[apply_inverse_constraint_map(basis, celldofs(dof_handler_ψ, cell.cellid), :ψ), n]        # dof numberings of ψ and ρ don't match
             ψ_evals = ref_evals_ψ * ψ_cell
+
             fe += ψ_evals .* (ψ_fine[celldofs(cell)] .== 0)                 # only add to values once
             assemble!(ψ_fine, celldofs(cell), fe)
         end
 
-        remove_bc!(ψ_fine, constraint_handler_ρ)
-
-        ρ .+= abs.(ψ_fine).^2 * occupation[n]
+        ρ .+= abs.(ψ_fine[get_free_dofs(basis, :ρ)]).^2 * occupation[n]
     end
 
     # There can always be small negative densities, e.g. due to numerical fluctuations

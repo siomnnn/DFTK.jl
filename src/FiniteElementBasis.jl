@@ -191,12 +191,15 @@ function load_grid_from_file(filename::String)
 end
 
 get_n_dofs(basis::FiniteElementBasis) = (; ψ=basis.discretization.ψ_dof_handler.ndofs, ρ=basis.discretization.ρ_dof_handler.ndofs)
+get_n_free_dofs(basis::FiniteElementBasis) = (; ψ=length(basis.discretization.ψ_constraint_handler.free_dofs), ρ=length(basis.discretization.ρ_constraint_handler.free_dofs))
 get_dof_handlers(basis::FiniteElementBasis) = (; ψ=basis.discretization.ψ_dof_handler, ρ=basis.discretization.ρ_dof_handler)
 get_constraint_handlers(basis::FiniteElementBasis) = (; ψ=basis.discretization.ψ_constraint_handler, ρ=basis.discretization.ρ_constraint_handler)
 get_cell_values(basis::FiniteElementBasis) = (; ψ=basis.discretization.ψ_cell_valuescell_values, ρ=basis.discretization.ρ_cell_values)
 get_nodes(basis::FiniteElementBasis) = basis.discretization.grid.nodes
 
 get_n_dofs(basis::FiniteElementBasis, field::Symbol) = get_n_dofs(basis.discretization, field)
+get_n_free_dofs(basis::FiniteElementBasis, field::Symbol) = get_n_free_dofs(basis.discretization, field)
+get_free_dofs(basis::FiniteElementBasis, field::Symbol) = get_free_dofs(basis.discretization, field)
 get_dof_handler(basis::FiniteElementBasis, field::Symbol) = get_dof_handler(basis.discretization, field)
 get_constraint_handler(basis::FiniteElementBasis, field::Symbol) = get_constraint_handler(basis.discretization, field)
 get_cell_values(basis::FiniteElementBasis, field::Symbol) = get_cell_values(basis.discretization, field)
@@ -205,6 +208,8 @@ get_inverse_constraint_map(basis::FiniteElementBasis, field::Symbol) = get_inver
 get_dof_positions(basis::FiniteElementBasis, field::Symbol) = get_dof_positions(basis.discretization, field)
 get_dof_map(basis::FiniteElementBasis) = get_dof_map(basis.discretization)
 reduce_dofs(basis::FiniteElementBasis, f) = f[get_dof_map(basis)]
+
+apply_inverse_constraint_map(basis::FiniteElementBasis, f, field::Symbol) = get_inverse_constraint_map(basis, field)[f]
 
 function get_neg_half_laplace_matrix(basis::FiniteElementBasis, field::Symbol)
     if field == :ψ

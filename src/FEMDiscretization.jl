@@ -41,7 +41,7 @@ function FEMDiscretization(lattice::Mat3{T},
 
     ψ_inverse_constraint_map, ρ_inverse_constraint_map = setup_inverse_constraint_map(ψ_constraint_handler), setup_inverse_constraint_map(ρ_constraint_handler)
 
-    dof_map = setup_dof_map(ψ_dof_handler, ρ_dof_handler, ψ_cell_values)
+    dof_map = setup_dof_map(ψ_dof_handler, ρ_dof_handler, ψ_cell_values, ψ_inverse_constraint_map, ρ_inverse_constraint_map)
 
     return FEMDiscretization{T, S, C}(lattice, grid, ψ_dof_handler, ρ_dof_handler,
                                       ψ_constraint_handler, ρ_constraint_handler,
@@ -111,8 +111,8 @@ function setup_inverse_constraint_map(ch::ConstraintHandler)
     return inverse_constraint_map
 end
 
-function setup_dof_map(ψ_dh::DofHandler, ρ_dh::DofHandler, ψ_cv::CellValues)
-    dof_map = zeros(Int, ndofs(ψ_dh))
+function setup_dof_map(ψ_dh::DofHandler, ρ_dh::DofHandler, ψ_cv::CellValues, ψ_inverse_constraint_map::Vector{Int}, ρ_inverse_constraint_map::Vector{Int})
+    dof_map = zeros(Int, maximum(ψ_inverse_constraint_map))
 
     ψ_ref_coords = Ferrite.reference_coordinates(Ferrite.getfieldinterpolation(ψ_dh, Ferrite.find_field(ψ_dh, :ψ)))
     ρ_ref_coords = Ferrite.reference_coordinates(Ferrite.getfieldinterpolation(ρ_dh, Ferrite.find_field(ρ_dh, :ρ)))
@@ -121,7 +121,11 @@ function setup_dof_map(ψ_dh::DofHandler, ρ_dh::DofHandler, ψ_cv::CellValues)
 
     for cell in CellIterator(ψ_dh)
         reinit!(ψ_cv, cell)
-        dof_map[celldofs(cell)] = celldofs(ρ_dh, cell.cellid)[local_map]
+
+        periodic_cell_dofs_ψ = ψ_inverse_constraint_map[celldofs(cell)]
+        periodic_cell_dofs_ρ = ρ_inverse_constraint_map[celldofs(ρ_dh, cell.cellid)]
+
+        dof_map[periodic_cell_dofs_ψ] = periodic_cell_dofs_ρ[local_map]
     end
 
     return dof_map
@@ -168,8 +172,13 @@ function get_inverse_constraint_map(disc::FEMDiscretization, field::Symbol)
 end
 
 get_n_dofs(disc::FEMDiscretization, field::Symbol) = ndofs(get_dof_handler(disc, field))
+get_n_free_dofs(disc::FEMDiscretization, field::Symbol) = length(get_constraint_handler(disc, field).free_dofs)
+get_free_dofs(disc::FEMDiscretization, field::Symbol) = get_constraint_handler(disc, field).free_dofs
 
 get_dof_map(disc::FEMDiscretization) = disc.dof_map
+reduce_dofs(disc::FEMDiscretization, f) = f[get_dof_map(disc)]
+
+apply_inverse_constraint_map(disc::FEMDiscretization, f, field::Symbol) = get_inverse_constraint_map(disc, field)[f]
 
 function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
     dh = get_dof_handler(disc, field)
@@ -201,7 +210,8 @@ function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
 
     Ferrite.apply!(H, ch)
 
-    H
+    free_dofs = get_free_dofs(disc, field)
+    H[free_dofs, free_dofs]
 end
 
 function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T
@@ -235,7 +245,8 @@ function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T
 
     Ferrite.apply!(neg_half_laplace, ch)
 
-    neg_half_laplace
+    free_dofs = get_free_dofs(disc, field)
+    neg_half_laplace[free_dofs, free_dofs]
 end
 
 function get_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T

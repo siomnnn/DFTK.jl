@@ -71,9 +71,6 @@ end
 
 @timing "ene_ops: FEM kinetic" function ene_ops(term::TermKineticFEM, basis::FiniteElementBasis{T},
                                             ψ, occupation; kwargs...) where {T}
-    @assert all(ψ[get_constraint_handler(basis, :ψ).prescribed_dofs, :] .== 0) ("ψ does not satisfy periodic boundary conditions. "
-                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
-                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
     ops = [NegHalfLaplaceFEMOperator(basis)]
     if isnothing(ψ) || isnothing(occupation)
         return (; E=T(Inf), ops)

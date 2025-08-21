@@ -44,7 +44,7 @@ struct NoopFEMOperator{T <: Real} <: FEMOperator
 end
 apply!(Hψ, op::NoopFEMOperator, ψ) = nothing
 function Matrix(op::NoopFEMOperator)
-    n_dofs = get_n_dofs(op.basis, :ψ)
+    n_dofs = get_n_free_dofs(op.basis, :ψ)
     zeros(eltype(op.basis), n_dofs, n_dofs)
 end
 
@@ -64,18 +64,11 @@ struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     potential::AT
 end
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    @assert all(ψ[get_constraint_handler(op.basis, :ψ).prescribed_dofs] .== 0) ("ψ does not satisfy periodic boundary conditions. "
-                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
-                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
-
     dof_handler = get_dof_handler(op.basis, :ψ)
     cell_values = get_cell_values(op.basis, :ψ)
     constraint_handler = get_constraint_handler(op.basis, :ψ)
 
     out = zeros(eltype(op.basis), ndofs(dof_handler))
-
-    ψ_temp = copy(ψ)
-    Ferrite.apply!(ψ_temp, constraint_handler)
 
     n_basefuncs = getnbasefunctions(cell_values)
     fe = zeros(n_basefuncs)
@@ -88,8 +81,10 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
         reinit!(cell_values, cell)
         fill!(fe, 0)
 
-        pot_interpol = ϕ_evals * op.potential[celldofs(cell)]
-        ψ_interpol = ϕ_evals * ψ_temp[celldofs(cell)]
+        periodic_cell_dofs = apply_inverse_constraint_map(op.basis, celldofs(cell), :ψ)
+
+        pot_interpol = ϕ_evals * op.potential[periodic_cell_dofs]
+        ψ_interpol = ϕ_evals * ψ[periodic_cell_dofs]
         dΩ = getdetJdV.([cell_values], 1:n_quad)
         
         for i in 1:n_basefuncs
@@ -101,10 +96,9 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
 
     apply_bc!(out, constraint_handler)
 
-    Hψ .+= out
+    Hψ .+= out[get_free_dofs(op.basis, :ψ)]
 end
 function Matrix(op::FEMRealSpaceMultiplication)
-    # V(ϕ1, ϕ2) = <ϕ1|V|ϕ2> = ∫ conj(ϕ1(r)) V(r) ϕ2(r) dr
     dof_handler = get_dof_handler(op.basis, :ψ)
     constr_handler = get_constraint_handler(op.basis, :ψ)
     cell_values = get_cell_values(op.basis, :ψ)
@@ -125,7 +119,9 @@ function Matrix(op::FEMRealSpaceMultiplication)
         reinit!(cell_values, cell)
         fill!(Ke, 0)
 
-        pot_interpol = ϕ_evals * op.potential[celldofs(cell)]
+        periodic_cell_dofs = apply_inverse_constraint_map(op.basis, celldofs(cell), :ψ)
+
+        pot_interpol = ϕ_evals * op.potential[periodic_cell_dofs]
         dΩ = getdetJdV.([cell_values], 1:n_quad)
 
         for i in 1:n_basefuncs, j in 1:n_basefuncs
@@ -137,7 +133,8 @@ function Matrix(op::FEMRealSpaceMultiplication)
 
     Ferrite.apply!(H, constr_handler)
 
-    H
+    free_dofs = get_free_dofs(op.basis, :ψ)
+    H[free_dofs, free_dofs]
 end
 
 #"""
@@ -167,18 +164,11 @@ struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
     basis::FiniteElementBasis{T}
 end
 function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
-    @assert all(ψ[get_constraint_handler(op.basis, :ψ).prescribed_dofs] .== 0) ("ψ does not satisfy periodic boundary conditions. "
-                                                          * "Use apply_bc! to add up values at periodic degrees of freedom, "
-                                                          * "or remove_bc! to zero out the prescribed degrees of freedom.")
-
     laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)
     if !isnothing(laplace_matrix)
         Hψ .+= laplace_matrix * ψ
         return
     end
-
-    ψ_temp = copy(ψ)
-    Ferrite.apply!(ψ_temp, get_constraint_handler(op.basis, :ψ))
 
     dof_handler = get_dof_handler(op.basis, :ψ)
     cell_values = get_cell_values(op.basis, :ψ)
@@ -193,8 +183,10 @@ function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
         reinit!(cell_values, cell)
         fill!(fe, 0)
 
+        periodic_cell_dofs = apply_inverse_constraint_map(op.basis, celldofs(cell), :ψ)
+
         ∇ϕ_evals = shape_gradient.([cell_values], 1:n_quad, (1:n_basefuncs)')
-        ψ_interpol = ∇ϕ_evals * ψ_temp[celldofs(cell)]
+        ψ_interpol = ∇ϕ_evals * ψ[periodic_cell_dofs]
         dΩ = getdetJdV.([cell_values], 1:n_quad)
 
         for i in 1:n_basefuncs
@@ -206,7 +198,7 @@ function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
 
     apply_bc!(out, get_constraint_handler(op.basis, :ψ))
 
-    Hψ .+= out
+    Hψ .+= out[get_free_dofs(op.basis, :ψ)]
     return
 end
 function Matrix(op::NegHalfLaplaceFEMOperator)
