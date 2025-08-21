@@ -214,23 +214,4 @@ function Matrix(op::NegHalfLaplaceFEMOperator)
         return op.basis.neg_half_laplacian
     end
     init_neg_half_laplace_matrix(op.basis.discretization, :ψ)
-end    
-
-# The way Ferrite applies boundary conditions to vectors is not the way that we want it to.
-# In particular, it does not "merge" the values of periodic dofs, but rather overwrites one with
-# the other. Here, we need to consider all periodic dofs _not_ as redundant/overwritable,
-# but rather as components of the same coefficient -> overwrite them with their sum.
-function apply_bc!(f::AbstractVector, ch::ConstraintHandler)
-    for (i, pdof) in pairs(ch.prescribed_dofs)
-        dofcoef = ch.dofcoefficients[i]
-        if dofcoef !== nothing # if affine constraint
-            for (d, v) in dofcoef
-                f[d] += f[pdof] * v
-            end
-        end
-        f[pdof] = 0
-    end
-    return
 end
-
-remove_bc!(f::AbstractVector, ch::ConstraintHandler) = (f[ch.prescribed_dofs] .= 0)

@@ -18,7 +18,9 @@ struct FEMDiscretization{T, S <: Ferrite.AbstractRefShape, C <: Ferrite.Abstract
     ρ_constraint_handler::ConstraintHandler{DofHandler{3, Grid{3, C, T}}, T}
     ψ_cell_values::CellValues
     ρ_cell_values::CellValues
-    dof_map::Vector{Int}            # index with ψ dofs to get ρ dofs
+    ψ_inverse_constraint_map::Vector{Int}       # map from prescribed dofs to free dofs
+    ρ_inverse_constraint_map::Vector{Int}
+    dof_map::Vector{Int}                        # index with ψ dofs to get ρ dofs
 end
 
 @doc raw"""
@@ -33,15 +35,18 @@ function FEMDiscretization(lattice::Mat3{T},
     ψ_ip = Lagrange{S, degree}()
     ρ_ip = Lagrange{S, 2*degree}()
 
-    ψ_dof_handler, ρ_dof_handler = setup_dofs(grid, ψ_ip, ρ_ip)
-    ψ_cell_values, ρ_cell_values = setup_cell_values(ψ_ip, ρ_ip)
+    ψ_dof_handler, ρ_dof_handler = setup_dofs(grid, ψ_ip, :ψ), setup_dofs(grid, ρ_ip, :ρ)
+    ψ_cell_values, ρ_cell_values = setup_cell_values(ψ_ip), setup_cell_values(ρ_ip)
     ψ_constraint_handler, ρ_constraint_handler = setup_periodic_boundaries(lattice, ψ_dof_handler, ρ_dof_handler)
+
+    ψ_inverse_constraint_map, ρ_inverse_constraint_map = setup_inverse_constraint_map(ψ_constraint_handler), setup_inverse_constraint_map(ρ_constraint_handler)
 
     dof_map = setup_dof_map(ψ_dof_handler, ρ_dof_handler, ψ_cell_values)
 
     return FEMDiscretization{T, S, C}(lattice, grid, ψ_dof_handler, ρ_dof_handler,
                                       ψ_constraint_handler, ρ_constraint_handler,
                                       ψ_cell_values, ρ_cell_values,
+                                      ψ_inverse_constraint_map, ρ_inverse_constraint_map,
                                       dof_map)
 end
 
@@ -56,22 +61,17 @@ function FEMDiscretization(lattice::Mat3{T}, filename::String; degree::Int=1) wh
     return FEMDiscretization(lattice, grid; degree)
 end
 
-function setup_dofs(grid::Grid, ψ_ip::Interpolation, ρ_ip::Interpolation)
-    ψ_dh = DofHandler(grid)
-    add!(ψ_dh, :ψ, ψ_ip)
-    close!(ψ_dh)
-
-    ρ_dh = DofHandler(grid)
-    add!(ρ_dh, :ρ, ρ_ip)
-    close!(ρ_dh)
-    return ψ_dh, ρ_dh
+function setup_dofs(grid::Grid, ip::Interpolation, field::Symbol)
+    dh = DofHandler(grid)
+    add!(dh, field, ip)
+    close!(dh)
+    return dh
 end
 
-function setup_cell_values(ψ_ip::Interpolation{S}, ρ_ip::Interpolation{S}; degree=2) where {S <: Ferrite.AbstractRefShape}
+function setup_cell_values(ip::Interpolation{S}; degree=2) where {S <: Ferrite.AbstractRefShape}
     qr = QuadratureRule{S}(degree)
-    ψ_cv = CellValues(qr, ψ_ip)
-    ρ_cv = CellValues(qr, ρ_ip)
-    return ψ_cv, ρ_cv
+    cv = CellValues(qr, ip)
+    return cv
 end
 
 function setup_periodic_boundaries(lattice::Mat3, ψ_dh::DofHandler, ρ_dh::DofHandler)
@@ -94,6 +94,21 @@ function setup_periodic_boundaries(lattice::Mat3, ψ_dh::DofHandler, ρ_dh::DofH
     close!(ρ_ch)
     update!(ρ_ch, 0)
     return ψ_ch, ρ_ch
+end
+
+function setup_inverse_constraint_map(ch::ConstraintHandler)
+    inverse_constraint_map = zeros(Int, ndofs(ch.dh))
+    for (i, dof) in enumerate(ch.free_dofs)
+        inverse_constraint_map[dof] = i
+    end
+    for (i, pdof) in pairs(ch.prescribed_dofs)
+        dofcoef = ch.dofcoefficients[i]
+        if dofcoef !== nothing
+            @assert length(dofcoef) == 1 "General affine constraints are not supported."
+            inverse_constraint_map[pdof] = inverse_constraint_map[dofcoef[1][1]]
+        end
+    end
+    return inverse_constraint_map
 end
 
 function setup_dof_map(ψ_dh::DofHandler, ρ_dh::DofHandler, ψ_cv::CellValues)
@@ -142,4 +157,120 @@ function get_cell_values(disc::FEMDiscretization, field::Symbol)
     end
 end
 
+function get_inverse_constraint_map(disc::FEMDiscretization, field::Symbol)
+    if field == :ψ
+        return disc.ψ_inverse_constraint_map
+    elseif field == :ρ
+        return disc.ρ_inverse_constraint_map
+    else
+        error("Invalid field: $field. Only :ψ and :ρ are supported.")
+    end
+end
+
+get_n_dofs(disc::FEMDiscretization, field::Symbol) = ndofs(get_dof_handler(disc, field))
+
 get_dof_map(disc::FEMDiscretization) = disc.dof_map
+
+function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
+    dh = get_dof_handler(disc, field)
+    ch = get_constraint_handler(disc, field)
+    cv = get_cell_values(disc, field)
+
+    H = allocate_matrix(dh, ch)
+    assembler = start_assemble(H)
+
+    n_basefuncs = getnbasefunctions(cv)
+    Ke = zeros(complex(T), n_basefuncs, n_basefuncs)
+
+    n_quad = getnquadpoints(cv)
+    ϕ_evals = shape_value.([cv], 1:n_quad, (1:n_basefuncs)')
+
+    # TODO: is parallelization possible even though we are reinit-ing cell_values?
+    for cell in CellIterator(dh)
+        reinit!(cv, cell)
+        fill!(Ke, 0)
+        
+        dΩ = getdetJdV.([cv], 1:n_quad)
+        
+        for i in 1:n_basefuncs, j in 1:n_basefuncs
+            Ke[i, j] += (ϕ_evals[:, i] .* ϕ_evals[:, j])' * dΩ
+        end
+    
+        assemble!(assembler, celldofs(cell), Ke)
+    end
+
+    Ferrite.apply!(H, ch)
+
+    H
+end
+
+function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T
+    dh = get_dof_handler(disc, field)
+    ch = get_constraint_handler(disc, field)
+    cv = get_cell_values(disc, field)
+
+    neg_half_laplace = allocate_matrix(dh, ch)
+
+    n_basefuncs = getnbasefunctions(cv)
+    Ke = zeros(complex(T), n_basefuncs, n_basefuncs)
+    
+    assembler = start_assemble(neg_half_laplace)
+
+    n_quad = getnquadpoints(cv)
+
+    # TODO: is parallelization possible even though we are reinit-ing cell_values?
+    for cell in CellIterator(dh)
+        reinit!(cv, cell)
+        fill!(Ke, 0)
+        
+        ∇ϕ_evals = shape_gradient.([cv], 1:n_quad, (1:n_basefuncs)')
+        dΩ = getdetJdV.([cv], 1:n_quad)
+        
+        for i in 1:n_basefuncs, j in 1:n_basefuncs
+            Ke[i, j] += 0.5 * (∇ϕ_evals[:, i] .⋅ ∇ϕ_evals[:, j])' * dΩ
+        end
+    
+        assemble!(assembler, celldofs(cell), Ke)
+    end
+
+    Ferrite.apply!(neg_half_laplace, ch)
+
+    neg_half_laplace
+end
+
+function get_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T
+    dh = get_dof_handler(disc, field)
+    ip = Ferrite.getfieldinterpolation(dh, Ferrite.find_field(dh, field))
+    ref_coords = hcat(Ferrite.reference_coordinates(ip)...)
+    cell_values = get_cell_values(disc, field)
+
+    dof_coords = zeros(SVector{3, T}, get_n_dofs(disc, field))
+    for cell in CellIterator(dh)
+        reinit!(cell_values, cell)
+        
+        cell_dof_coords = cell.coords[1] .+ cell.coords[2] * ref_coords[1, :]'
+                                         .+ cell.coords[3] * ref_coords[2, :]'
+                                         .+ cell.coords[4] * ref_coords[3, :]'
+        dof_coords[celldofs(cell)] .= SVector{3}.(eachcol(cell_dof_coords))
+    end
+    return dof_coords
+end
+
+# The way Ferrite applies boundary conditions to vectors is not the way that we want it to.
+# In particular, it does not "merge" the values of periodic dofs, but rather overwrites one with
+# the other. Here, we need to consider all periodic dofs _not_ as redundant/overwritable,
+# but rather as components of the same coefficient -> overwrite them with their sum.
+function apply_bc!(f::AbstractVector, ch::ConstraintHandler)
+    for (i, pdof) in pairs(ch.prescribed_dofs)
+        dofcoef = ch.dofcoefficients[i]
+        if dofcoef !== nothing # if affine constraint
+            for (d, v) in dofcoef
+                f[d] += f[pdof] * v
+            end
+        end
+        f[pdof] = 0
+    end
+    return
+end
+
+remove_bc!(f::AbstractVector, ch::ConstraintHandler) = (f[ch.prescribed_dofs] .= 0)

@@ -196,11 +196,13 @@ get_constraint_handlers(basis::FiniteElementBasis) = (; ψ=basis.discretization.
 get_cell_values(basis::FiniteElementBasis) = (; ψ=basis.discretization.ψ_cell_valuescell_values, ρ=basis.discretization.ρ_cell_values)
 get_nodes(basis::FiniteElementBasis) = basis.discretization.grid.nodes
 
-get_n_dofs(basis::FiniteElementBasis, field::Symbol) = get_dof_handler(basis.discretization, field).ndofs
+get_n_dofs(basis::FiniteElementBasis, field::Symbol) = get_n_dofs(basis.discretization, field)
 get_dof_handler(basis::FiniteElementBasis, field::Symbol) = get_dof_handler(basis.discretization, field)
 get_constraint_handler(basis::FiniteElementBasis, field::Symbol) = get_constraint_handler(basis.discretization, field)
 get_cell_values(basis::FiniteElementBasis, field::Symbol) = get_cell_values(basis.discretization, field)
+get_inverse_constraint_map(basis::FiniteElementBasis, field::Symbol) = get_inverse_constraint_map(basis.discretization, field)
 
+get_dof_positions(basis::FiniteElementBasis, field::Symbol) = get_dof_positions(basis.discretization, field)
 get_dof_map(basis::FiniteElementBasis) = get_dof_map(basis.discretization)
 reduce_dofs(basis::FiniteElementBasis, f) = f[get_dof_map(basis)]
 
@@ -224,92 +226,7 @@ function get_overlap_matrix(basis::FiniteElementBasis, field::Symbol)
     end
 end
 
-function get_dof_positions(basis::FiniteElementBasis{T}, field::Symbol) where T
-    dh = get_dof_handler(basis.discretization, field)
-    ip = Ferrite.getfieldinterpolation(dh, Ferrite.find_field(dh, field))
-    ref_coords = hcat(Ferrite.reference_coordinates(ip)...)
-    cell_values = get_cell_values(basis, field)
-
-    dof_coords = zeros(SVector{3, T}, get_n_dofs(basis, field))
-    for cell in CellIterator(dh)
-        reinit!(cell_values, cell)
-        
-        cell_dof_coords = cell.coords[1] .+ cell.coords[2] * ref_coords[1, :]'
-                                         .+ cell.coords[3] * ref_coords[2, :]'
-                                         .+ cell.coords[4] * ref_coords[3, :]'
-        dof_coords[celldofs(cell)] .= SVector{3}.(eachcol(cell_dof_coords))
-    end
-    return dof_coords
-end
-
 LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ψ, get_overlap_matrix(basis, field), ψ)^0.5
-
-function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
-    dh = get_dof_handler(disc, field)
-    ch = get_constraint_handler(disc, field)
-    cv = get_cell_values(disc, field)
-
-    H = allocate_matrix(dh, ch)
-    assembler = start_assemble(H)
-
-    n_basefuncs = getnbasefunctions(cv)
-    Ke = zeros(complex(T), n_basefuncs, n_basefuncs)
-
-    n_quad = getnquadpoints(cv)
-    ϕ_evals = shape_value.([cv], 1:n_quad, (1:n_basefuncs)')
-
-    # TODO: is parallelization possible even though we are reinit-ing cell_values?
-    for cell in CellIterator(dh)
-        reinit!(cv, cell)
-        fill!(Ke, 0)
-        
-        dΩ = getdetJdV.([cv], 1:n_quad)
-        
-        for i in 1:n_basefuncs, j in 1:n_basefuncs
-            Ke[i, j] += (ϕ_evals[:, i] .* ϕ_evals[:, j])' * dΩ
-        end
-    
-        assemble!(assembler, celldofs(cell), Ke)
-    end
-
-    Ferrite.apply!(H, ch)
-
-    H
-end
-
-function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T
-    dh = get_dof_handler(disc, field)
-    ch = get_constraint_handler(disc, field)
-    cv = get_cell_values(disc, field)
-
-    neg_half_laplace = allocate_matrix(dh, ch)
-
-    n_basefuncs = getnbasefunctions(cv)
-    Ke = zeros(complex(T), n_basefuncs, n_basefuncs)
-    
-    assembler = start_assemble(neg_half_laplace)
-
-    n_quad = getnquadpoints(cv)
-
-    # TODO: is parallelization possible even though we are reinit-ing cell_values?
-    for cell in CellIterator(dh)
-        reinit!(cv, cell)
-        fill!(Ke, 0)
-        
-        ∇ϕ_evals = shape_gradient.([cv], 1:n_quad, (1:n_basefuncs)')
-        dΩ = getdetJdV.([cv], 1:n_quad)
-        
-        for i in 1:n_basefuncs, j in 1:n_basefuncs
-            Ke[i, j] += 0.5 * (∇ϕ_evals[:, i] .⋅ ∇ϕ_evals[:, j])' * dΩ
-        end
-    
-        assemble!(assembler, celldofs(cell), Ke)
-    end
-
-    Ferrite.apply!(neg_half_laplace, ch)
-
-    neg_half_laplace
-end
 
 function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
     mat = get_neg_half_laplace_matrix(basis, field)
