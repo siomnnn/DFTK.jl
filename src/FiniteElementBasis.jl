@@ -239,10 +239,10 @@ function get_dof_positions(basis::FiniteElementBasis{T}, field::Symbol) where T
                                          .+ cell.coords[4] * ref_coords[3, :]'
         dof_coords[celldofs(cell)] .= SVector{3}.(eachcol(cell_dof_coords))
     end
-    return dof_coords'
+    return dof_coords
 end
 
-LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}) where T = dot(ψ, basis.overlap_matrix, ψ)^0.5
+LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ψ, get_overlap_matrix(basis, field), ψ)^0.5
 
 function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
     dh = get_dof_handler(disc, field)

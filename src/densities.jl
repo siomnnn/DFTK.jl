@@ -81,20 +81,24 @@ end
     end
 
     ρ = zeros(Tρ, get_n_dofs(basis, :ρ))
-    for cell in CellIterator(dof_handler_ρ)
+    for n in mask_occ
+        ψ_fine = zeros(Tρ, get_n_dofs(basis, :ρ))
         fe = zeros(Tρ, n_basefuncs_ρ)
-        reinit!(cell_values_ρ, cell)
 
-        for n in mask_occ
-            ψ_cell = ψ_temp[celldofs(dof_handler_ψ, cell.cellid), n]       # dof numberings of ψ and ρ don't match
+        for cell in CellIterator(dof_handler_ρ)
+            reinit!(cell_values_ρ, cell)
+            fill!(fe, 0)
+
+            ψ_cell = ψ_temp[celldofs(dof_handler_ψ, cell.cellid), n]        # dof numberings of ψ and ρ don't match
             ψ_evals = ref_evals_ψ * ψ_cell
-            fe += abs.(ψ_evals).^2
+            fe += ψ_evals .* (ψ_fine[celldofs(cell)] .== 0)                 # only add to values once
+            assemble!(ψ_fine, celldofs(cell), fe)
         end
 
-        assemble!(ρ, celldofs(cell), fe)
-    end
+        remove_bc!(ψ_fine, constraint_handler_ρ)
 
-    remove_bc!(ρ, constraint_handler_ρ)
+        ρ .+= abs.(ψ_fine).^2 * occupation[n]
+    end
 
     # There can always be small negative densities, e.g. due to numerical fluctuations
     # in a vacuum region, so put some tolerance even if occupation_threshold == 0
