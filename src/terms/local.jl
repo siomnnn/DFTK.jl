@@ -30,7 +30,6 @@ end
     if :ρ in keys(kwargs)
         ρ = kwargs[:ρ]
         dof_handler = get_dof_handler(basis, :ρ)
-        constraint_handler = get_constraint_handler(basis, :ρ)
         cell_values = get_cell_values(basis, :ρ)
 
         E = zero(T)

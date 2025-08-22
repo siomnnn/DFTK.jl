@@ -255,14 +255,15 @@ function get_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T
     ref_coords = hcat(Ferrite.reference_coordinates(ip)...)
     cell_values = get_cell_values(disc, field)
 
-    dof_coords = zeros(SVector{3, T}, get_n_dofs(disc, field))
+    dof_coords = zeros(SVector{3, T}, get_n_free_dofs(disc, field))
     for cell in CellIterator(dh)
         reinit!(cell_values, cell)
         
-        cell_dof_coords = cell.coords[1] .+ cell.coords[2] * ref_coords[1, :]'
-                                         .+ cell.coords[3] * ref_coords[2, :]'
-                                         .+ cell.coords[4] * ref_coords[3, :]'
-        dof_coords[celldofs(cell)] .= SVector{3}.(eachcol(cell_dof_coords))
+        cell_dof_coords = (cell.coords[1] * (1 .- ref_coords[1, :] .- ref_coords[2, :] .- ref_coords[3, :])'
+                            .+ cell.coords[2] * ref_coords[1, :]'
+                            .+ cell.coords[3] * ref_coords[2, :]'
+                            .+ cell.coords[4] * ref_coords[3, :]')
+        dof_coords[apply_inverse_constraint_map(disc, celldofs(cell), field)] .= SVector{3}.(eachcol(cell_dof_coords))
     end
     return dof_coords
 end
