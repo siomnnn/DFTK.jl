@@ -67,12 +67,34 @@ end
 end
 @timing "ene_ops: FEM hartree" function ene_ops(term::TermHartreeFEM, basis::FiniteElementBasis{T},
                                             ψ, occupation; ρ, kwargs...) where {T}
-    ρ_zero_mean = ρ .- sum(ρ) / get_n_dofs(basis, :ρ) # basis.model.n_electrons / basis.model.unit_cell_volume
-    pot = solve_laplace(basis, ρ_zero_mean, :ρ)*term.scaling_factor
+    # the zero-mean condition necessary for the linear system to have solutions
+    # is different from the zero-mean condition on the Hartree potential itself
+    means_diff = sum(ρ)/get_n_free_dofs(basis, :ρ) - basis.model.n_electrons/basis.model.unit_cell_volume
+    ρ_zero_mean = ρ .- sum(ρ)/get_n_free_dofs(basis, :ρ)
+    pot = solve_laplace(basis, ρ_zero_mean, :ρ)*term.scaling_factor .+ means_diff
+
     ops = [FEMRealSpaceMultiplication(basis, pot)]
 
-    println("yay")
-    println(pot)
+    dof_handler = get_dof_handler(basis, :ρ)
+    cell_values = get_cell_values(basis, :ρ)
+
+    E = zero(T)
+    
+    n_basefuncs = getnbasefunctions(cell_values)
+    n_quad = getnquadpoints(cell_values)
+    ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
+    
+    for cell in CellIterator(dof_handler)
+        reinit!(cell_values, cell)
+
+        periodic_cell_dofs = apply_inverse_constraint_map(basis, celldofs(cell), :ρ)
+    
+        pot_interpol = ϕ_evals * pot[periodic_cell_dofs]
+        ρ_interpol = ϕ_evals * ρ[periodic_cell_dofs]
+        dΩ = getdetJdV.([cell_values], 1:n_quad)
+
+        E += (pot_interpol .* ρ_interpol)' * dΩ
+    end
     
     (; E, ops)
 end

@@ -1,6 +1,7 @@
 using Ferrite
 using FerriteGmsh
 using Gmsh: gmsh
+using Krylov
 
 @doc raw"""
 A finite-element discretized `Model`.
@@ -236,10 +237,13 @@ LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::S
 function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
     mat = get_neg_half_laplace_matrix(basis, field)
     if !isnothing(mat)
-        return linsolve(mat, f, 0*f, GMRES())[1]
+        (x, stats) = minres_qlp(mat, f)
+        stats.solved || error("Laplacian solve did not converge")
+        return x
     end
 
     op = NegHalfLaplaceFEMOperator(basis)
-    apply_map = x -> op * x
-    return linsolve(apply_map, f; isposdef=true)[1]
+    (x, stats) = minres_qlp(op, f)
+    stats.solved || error("Laplacian solve did not converge")
+    return x
 end
