@@ -80,7 +80,7 @@ end
     E = zero(T)
     for iband = 1:size(ψ, 2)
         ψn = @views ψ[:, iband]
-        E += occ[iband] * real(dot(ψn, ops[1]*ψn))      # no faster way to do this unfortunately
+        E += occ[iband] * dot(ψn, get_neg_half_laplace_matrix(basis, :ψ), ψn)
     end
 
     (; E, ops)

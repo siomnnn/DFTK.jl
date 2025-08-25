@@ -29,26 +29,8 @@ end
 
     if :ρ in keys(kwargs)
         ρ = kwargs[:ρ]
-        dof_handler = get_dof_handler(basis, :ρ)
-        cell_values = get_cell_values(basis, :ρ)
-
-        E = zero(T)
         
-        n_basefuncs = getnbasefunctions(cell_values)
-        n_quad = getnquadpoints(cell_values)
-        ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
-        
-        for cell in CellIterator(dof_handler)
-            reinit!(cell_values, cell)
-
-            periodic_cell_dofs = apply_inverse_constraint_map(basis, celldofs(cell), :ρ)
-        
-            pot_interpol = ϕ_evals * term.potential_values[periodic_cell_dofs]
-            ρ_interpol = ϕ_evals * ρ[periodic_cell_dofs]
-            dΩ = getdetJdV.([cell_values], 1:n_quad)
-
-            E += (pot_interpol .* ρ_interpol)' * dΩ
-        end
+        E = dot(ρ, get_overlap_matrix(basis, :ρ), term.potential_values)
     else
         E = T(Inf)
     end
@@ -74,7 +56,7 @@ function (external::ExternalFromValues)(basis::PlaneWaveBasis{T}) where {T}
     TermExternal(convert_dual.(T, external.potential_values))
 end
 function (external::ExternalFromValues)(basis::FiniteElementBasis{T}) where {T}
-    @assert length(external.potential_values) == get_n_dofs(basis, :ρ)
+    @assert length(external.potential_values) == get_n_free_dofs(basis, :ρ)
     TermExternal(convert_dual.(T, external.potential_values))
 end
 

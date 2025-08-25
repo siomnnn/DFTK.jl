@@ -38,9 +38,7 @@ struct TermNoop <: Term end
 function ene_ops(term::TermNoop, basis::PlaneWaveBasis{T}, ψ, occupation; kwargs...) where {T}
     (; E=zero(eltype(T)), ops=[NoopOperator(basis, kpt) for kpt in basis.kpoints])
 end
-
-struct TermNoopFEM <: Term end
-function ene_ops(term::TermNoopFEM, basis::FiniteElementBasis{T}, ψ, occupation; kwargs...) where {T}
+function ene_ops(term::TermNoop, basis::FiniteElementBasis{T}, ψ, occupation; kwargs...) where {T}
     (; E=zero(eltype(T)), ops=[NoopFEMOperator(basis)])
     
 end

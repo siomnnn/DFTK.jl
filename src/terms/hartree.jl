@@ -78,23 +78,7 @@ end
     dof_handler = get_dof_handler(basis, :ρ)
     cell_values = get_cell_values(basis, :ρ)
 
-    E = zero(T)
-    
-    n_basefuncs = getnbasefunctions(cell_values)
-    n_quad = getnquadpoints(cell_values)
-    ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
-    
-    for cell in CellIterator(dof_handler)
-        reinit!(cell_values, cell)
-
-        periodic_cell_dofs = apply_inverse_constraint_map(basis, celldofs(cell), :ρ)
-    
-        pot_interpol = ϕ_evals * pot[periodic_cell_dofs]
-        ρ_interpol = ϕ_evals * ρ[periodic_cell_dofs]
-        dΩ = getdetJdV.([cell_values], 1:n_quad)
-
-        E += (pot_interpol .* ρ_interpol)' * dΩ
-    end
+    E = dot(pot, get_overlap_matrix(basis, :ρ), ρ) / 2
     
     (; E, ops)
 end

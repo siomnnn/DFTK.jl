@@ -185,11 +185,20 @@ function ρ_from_total_and_spin(ρtot, ρspin=nothing)
     end
 end
 
-function ρ_from_total(basis, ρtot::AbstractArray{T}) where {T}
+function ρ_from_total(basis::PlaneWaveBasis{T}, ρtot::AbstractArray{T}) where {T}
     if basis.model.spin_polarization in (:none, :spinless)
         ρspin = nothing
     else
         ρspin = zeros_like(G_vectors(basis), T, basis.fft_size...)
+    end
+    ρ_from_total_and_spin(ρtot, ρspin)
+end
+
+function ρ_from_total(basis::FiniteElementBasis{T}, ρtot::AbstractVector{T}) where {T}
+    if basis.model.spin_polarization in (:none, :spinless)
+        ρspin = nothing
+    else
+        ρspin = zeros(T, length(ρtot))
     end
     ρ_from_total_and_spin(ρtot, ρspin)
 end
