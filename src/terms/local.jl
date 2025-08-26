@@ -24,8 +24,7 @@ end
 @timing "ene_ops: FEM local" function ene_ops(term::TermLocalPotential,
                                           basis::FiniteElementBasis{T}, ψ, occupation;
                                           kwargs...) where {T}
-    ψ_pot = reduce_dofs(basis, term.potential_values)
-    ops = [FEMRealSpaceMultiplication(basis, ψ_pot)]
+    ops = [FEMRealSpaceMultiplication(basis, term.potential_values)]
 
     if :ρ in keys(kwargs)
         ρ = kwargs[:ρ]

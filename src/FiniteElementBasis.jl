@@ -20,12 +20,13 @@ struct FiniteElementBasis{T,
     discretization::FEMDiscretization{T}  # Real-space finite element discretization of the unit cell.
 
     ψ_overlap_matrix::AbstractMatrix{T}
-    ψ_neg_half_laplacian::Union{AbstractMatrix{T}, Nothing}   # Matrix representation of the negative half Laplacian operator.
-                                                            # Precomputation can be turned off in the constructor.
-    ρ_overlap_matrix::AbstractMatrix{T}
-    ρ_neg_half_laplacian::Union{AbstractMatrix{T}, Nothing}   # Matrix representation of the negative half Laplacian operator.
-                                                            # Precomputation can be turned off in the constructor.
+    ψ_neg_half_laplacian::Union{AbstractMatrix{T}, Nothing}
 
+    ρ_overlap_matrix::AbstractMatrix{T}
+    ρ_neg_half_laplacian::Union{AbstractMatrix{T}, Nothing}
+
+    refinement_matrix::AbstractMatrix{T}        # Matrix to refine a function from the coarser ψ interpolation to the finer ρ interpolation (ψ_fine = refinement_matrix * ψ_coarse).
+    
     ## Information on the hardware and device used for computations.
     architecture::Arch
 
@@ -52,11 +53,12 @@ function FiniteElementBasis(model::Model{T, VT},
         ψ_neg_half_laplacian = init_neg_half_laplace_matrix(discretization, :ψ)
         ρ_neg_half_laplacian = init_neg_half_laplace_matrix(discretization, :ρ)
     end
+    refinement_matrix = init_refinement_matrix(discretization)
 
     basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization,
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
-                                           architecture, terms)
+                                           refinement_matrix, architecture, terms)
 
     # TODO: make terms work
     #for (it, t) in enumerate(model.term_types)
@@ -231,6 +233,8 @@ function get_overlap_matrix(basis::FiniteElementBasis, field::Symbol)
         error("Invalid field: $field. Only :ψ and :ρ are supported.")
     end
 end
+
+get_refinement_matrix(basis::FiniteElementBasis) = basis.refinement_matrix
 
 LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ψ, get_overlap_matrix(basis, field), ψ)^0.5
 

@@ -249,6 +249,36 @@ function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T
     neg_half_laplace[free_dofs, free_dofs]
 end
 
+function init_refinement_matrix(disc::FEMDiscretization{T}) where T
+    dh_ψ = get_dof_handler(disc, :ψ)
+    dh_ρ = get_dof_handler(disc, :ρ)
+    cv_ψ = get_cell_values(disc, :ψ)
+    cv_ρ = get_cell_values(disc, :ρ)
+
+    ip_ψ = Ferrite.getfieldinterpolation(dh_ψ, Ferrite.find_field(dh_ψ, :ψ))
+    ip_ρ = Ferrite.getfieldinterpolation(dh_ρ, Ferrite.find_field(dh_ρ, :ρ))
+    ref_coords_ρ = Ferrite.reference_coordinates(ip_ρ)
+
+    n_basefuncs_ψ = getnbasefunctions(cv_ψ)
+    ref_evals_ψ = Ferrite.reference_shape_value.([ip_ψ], ref_coords_ρ, (1:n_basefuncs_ψ)')
+
+    ψ_inds, ρ_inds, vals = Int[], Int[], T[]
+    for cell in CellIterator(dh_ρ)
+        reinit!(cv_ρ, cell)
+
+        ψ_dofs = apply_inverse_constraint_map(disc, celldofs(dh_ψ, cell.cellid), :ψ)
+        ρ_dofs = apply_inverse_constraint_map(disc, celldofs(cell), :ρ)
+        
+        for (i_ρ, dof_ρ) in enumerate(ρ_dofs), (i_ψ, dof_ψ) in enumerate(ψ_dofs)
+            push!(ψ_inds, dof_ψ)
+            push!(ρ_inds, dof_ρ)
+            push!(vals, ref_evals_ψ[i_ρ, i_ψ])
+        end
+    end
+    return sparse(ρ_inds, ψ_inds, vals, get_n_free_dofs(disc, :ρ), get_n_free_dofs(disc, :ψ), max)      # max filters out duplicate entries. Values should be equal anyways,
+                                                                                                        # but by default sparse sums them up, which we have to prevent.
+end
+
 function get_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T
     dh = get_dof_handler(disc, field)
     ip = Ferrite.getfieldinterpolation(dh, Ferrite.find_field(dh, field))

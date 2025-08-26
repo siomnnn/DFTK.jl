@@ -64,39 +64,16 @@ struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     potential::AT
 end
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    dof_handler = get_dof_handler(op.basis, :ψ)
-    cell_values = get_cell_values(op.basis, :ψ)
-    constraint_handler = get_constraint_handler(op.basis, :ψ)
-
-    out = zeros(eltype(op.basis), ndofs(dof_handler))
-
-    n_basefuncs = getnbasefunctions(cell_values)
-    fe = zeros(n_basefuncs)
-
-    # all of these remain constant when reinit-ing cell_values in the case of a Lagrange basis
-    n_quad = getnquadpoints(cell_values)
-    ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
-
-    for cell in CellIterator(dof_handler)
-        reinit!(cell_values, cell)
-        fill!(fe, 0)
-
-        periodic_cell_dofs = apply_inverse_constraint_map(op.basis, celldofs(cell), :ψ)
-
-        pot_interpol = ϕ_evals * op.potential[periodic_cell_dofs]
-        ψ_interpol = ϕ_evals * ψ[periodic_cell_dofs]
-        dΩ = getdetJdV.([cell_values], 1:n_quad)
-        
-        for i in 1:n_basefuncs
-            fe[i] += (ϕ_evals[:, i] .* ψ_interpol .* pot_interpol)' * dΩ
-        end
+    M_ρ = get_overlap_matrix(op.basis, :ρ)
+    R = get_refinement_matrix(op.basis)
     
-        assemble!(out, celldofs(cell), fe)
-    end
+    M_ρTV = op.potential' * M_ρ
+    Rψ = R * ψ
 
-    apply_bc!(out, constraint_handler)
+    R_copy = copy(R)
+    R_copy.nzval .= R_copy.nzval .* Rψ[R_copy.rowval]       # weird SparseMatrix hack, wayyy faster than R .* Rψ for some reason
 
-    Hψ .+= out[get_free_dofs(op.basis, :ψ)]
+    Hψ .+= (M_ρTV * R_copy)'
 end
 function Matrix(op::FEMRealSpaceMultiplication)
     dof_handler = get_dof_handler(op.basis, :ψ)

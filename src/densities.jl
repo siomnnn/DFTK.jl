@@ -60,38 +60,10 @@ end
 
     mask_occ = findall(occ -> abs(occ) ≥ occupation_threshold, occupation)
 
-    dof_handler_ψ = get_dof_handler(basis, :ψ)
-    dof_handler_ρ = get_dof_handler(basis, :ρ)
-    constraint_handler_ψ = get_constraint_handler(basis, :ψ)
-    constraint_handler_ρ = get_constraint_handler(basis, :ρ)
-    cell_values_ψ = get_cell_values(basis, :ψ)
-    cell_values_ρ = get_cell_values(basis, :ρ)
-
-    ip_ψ = Ferrite.getfieldinterpolation(dof_handler_ψ, Ferrite.find_field(dof_handler_ψ, :ψ))
-    ip_ρ = Ferrite.getfieldinterpolation(dof_handler_ρ, Ferrite.find_field(dof_handler_ρ, :ρ))
-    ref_coords_ρ = Ferrite.reference_coordinates(ip_ρ)
-
-    n_basefuncs_ψ = getnbasefunctions(cell_values_ψ)
-    n_basefuncs_ρ = getnbasefunctions(cell_values_ρ)
-    ref_evals_ψ = Ferrite.reference_shape_value.([ip_ψ], ref_coords_ρ, (1:n_basefuncs_ψ)')
-
     ρ = zeros(Tρ, get_n_free_dofs(basis, :ρ))
     for n in mask_occ
-        ψ_fine = zeros(Tρ, get_n_dofs(basis, :ρ))
-        fe = zeros(Tρ, n_basefuncs_ρ)
-
-        for cell in CellIterator(dof_handler_ρ)
-            reinit!(cell_values_ρ, cell)
-            fill!(fe, 0)
-
-            ψ_cell = ψ[apply_inverse_constraint_map(basis, celldofs(dof_handler_ψ, cell.cellid), :ψ), n]        # dof numberings of ψ and ρ don't match
-            ψ_evals = ref_evals_ψ * ψ_cell
-
-            fe += ψ_evals .* (ψ_fine[celldofs(cell)] .== 0)                 # only add to values once
-            assemble!(ψ_fine, celldofs(cell), fe)
-        end
-
-        ρ .+= abs.(ψ_fine[get_free_dofs(basis, :ρ)]).^2 * occupation[n]
+        ψ_fine = get_refinement_matrix(basis) * ψ[:, n]
+        ρ .+= abs.(ψ_fine).^2 * occupation[n]
     end
 
     # There can always be small negative densities, e.g. due to numerical fluctuations
