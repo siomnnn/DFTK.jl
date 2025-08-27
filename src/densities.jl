@@ -58,12 +58,15 @@ end
 
     Tρ = promote_type(T, real(eltype(ψ[1])))
 
-    mask_occ = findall(occ -> abs(occ) ≥ occupation_threshold, occupation)
+    occupation = [to_cpu(oc) for oc in occupation]
+    mask_occ = [findall(occnk -> abs(occnk) ≥ occupation_threshold, occk)
+                for occk in occupation]
 
-    ρ = zeros(Tρ, get_n_free_dofs(basis, :ρ))
-    for n in mask_occ
-        ψ_fine = get_refinement_matrix(basis) * ψ[:, n]
-        ρ .+= abs.(ψ_fine).^2 * occupation[n]
+    ρ = zeros(Tρ, get_n_free_dofs(basis, :ρ), basis.model.n_spin_components)
+    for ik in eachindex(basis.kpoints), n in mask_occ[ik]
+        kpt = basis.kpoints[ik]
+        ψ_fine = get_refinement_matrix(basis) * ψ[ik][:, n]
+        ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs.(ψ_fine).^2)
     end
 
     # There can always be small negative densities, e.g. due to numerical fluctuations
@@ -139,11 +142,19 @@ end
 end
 
 total_density(ρ) = dropdims(sum(ρ; dims=4); dims=4)
+total_density_FEM(ρ) = dropdims(sum(ρ; dims=2); dims=2)
 @views function spin_density(ρ)
     if size(ρ, 4) == 2
         ρ[:, :, :, 1] - ρ[:, :, :, 2]
     else
         zero(ρ[:, :, :])
+    end
+end
+@views function spin_density_FEM(ρ)
+    if size(ρ, 2) == 2
+        ρ[:, 1] - ρ[:, 2]
+    else
+        zero(ρ[:])
     end
 end
 
@@ -166,11 +177,21 @@ function ρ_from_total(basis::PlaneWaveBasis{T}, ρtot::AbstractArray{T}) where 
     ρ_from_total_and_spin(ρtot, ρspin)
 end
 
+function ρ_from_total_and_spin_FEM(ρtot, ρspin=nothing)
+    if ρspin === nothing
+        # Val used to ensure inferability
+        cat(ρtot; dims=Val(2))  # copy for consistency with other case
+    else
+        cat((ρtot .+ ρspin) ./ 2,
+            (ρtot .- ρspin) ./ 2; dims=Val(2))
+    end
+end
+
 function ρ_from_total(basis::FiniteElementBasis{T}, ρtot::AbstractVector{T}) where {T}
     if basis.model.spin_polarization in (:none, :spinless)
         ρspin = nothing
     else
         ρspin = zeros(T, length(ρtot))
     end
-    ρ_from_total_and_spin(ρtot, ρspin)
+    ρ_from_total_and_spin_FEM(ρtot, ρspin)
 end

@@ -173,6 +173,7 @@ function optimize_operators(ops)
     end
     if isempty(RSmults)
         combined_RSFEMmults = FEMRealSpaceMultiplication(RSFEMmults[1].basis,
+                                                         RSFEMmults[1].kpoint,
                                                          sum([op.potential for op in RSFEMmults]))
         return [nonRSmults..., combined_RSFEMmults]
     end
@@ -180,6 +181,7 @@ function optimize_operators(ops)
                                                RSmults[1].kpoint,
                                                sum([op.potential for op in RSmults]))
     combined_RSFEMmults = FEMRealSpaceMultiplication(RSFEMmults[1].basis,
+                                                     RSFEMmults[1].kpoint,
                                                      sum([op.potential for op in RSFEMmults]))
     [nonRSmults..., combined_RSmults, combined_RSFEMmults]
 end

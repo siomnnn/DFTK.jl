@@ -41,6 +41,7 @@ Useful for energy terms that don't depend on the orbitals at all (eg nuclei-nucl
 """
 struct NoopFEMOperator{T <: Real} <: FEMOperator
     basis::FiniteElementBasis{T}
+    kpoint::FEMKPoint{T}
 end
 apply!(Hψ, op::NoopFEMOperator, ψ) = nothing
 function Matrix(op::NoopFEMOperator)
@@ -61,57 +62,37 @@ Hψ = |ϕ_i><ϕ_i|V|ψ>.
 """
 struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     basis::FiniteElementBasis{T}
+    kpoint::FEMKPoint{T}
     potential::AT
 end
+# We have to compute <ϕ_i|V|ψ> = ∫ ϕ_i(r) V(r) ψ(r) dr for ψ(r) = Σ_j ϕ_j(r) ψ_j, V(r) = Σ_k χ_k(r) V_k, where ϕ_i are
+# the basis functions for ψ (degree m) and χ_k the basis functions for ρ (degree 2m). We expand ϕ_i(r) in the basis
+# of χ_k(r) (this results in R * ψ), multiply by ϕ_j(r) (this is R .* (R * ψ)) and then integrate against V_k (this is V' * M_ρ * (R .* (R * ψ))).
+# All of this is done in an efficient way (minimal number of matvec operations).
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
     M_ρ = get_overlap_matrix(op.basis, :ρ)
     R = get_refinement_matrix(op.basis)
     
-    M_ρTV = op.potential' * M_ρ
+    VTM_ρ = op.potential' * M_ρ
     Rψ = R * ψ
 
     R_copy = copy(R)
-    R_copy.nzval .= R_copy.nzval .* Rψ[R_copy.rowval]       # weird SparseMatrix hack, wayyy faster than R .* Rψ for some reason
+    R_copy.nzval .= R_copy.nzval .* Rψ[R_copy.rowval]       # SparseArrays isn't smart enough to optimize terms with structural zeros, wayyy faster than R .* Rψ
 
-    Hψ .+= (M_ρTV * R_copy)'
+    Hψ .+= (VTM_ρ * R_copy)'
 end
 function Matrix(op::FEMRealSpaceMultiplication)
-    dof_handler = get_dof_handler(op.basis, :ψ)
-    constr_handler = get_constraint_handler(op.basis, :ψ)
-    cell_values = get_cell_values(op.basis, :ψ)
+    M_ρ = get_overlap_matrix(op.basis, :ρ)
+    R = get_refinement_matrix(op.basis)
 
-    H = allocate_matrix(dof_handler, constr_handler)
-
-    n_basefuncs = getnbasefunctions(cell_values)
-    Ke = zeros(complex(eltype(op.basis)), n_basefuncs, n_basefuncs)
-    
-    assembler = start_assemble(H)
-
-    # all of these remain constant when reinit-ing cell_values in the case of a Lagrange basis
-    n_quad = getnquadpoints(cell_values)
-    ϕ_evals = shape_value.([cell_values], 1:n_quad, (1:n_basefuncs)')
-
-    # TODO: is parallelization possible even though we are reinit-ing cell_values?
-    for cell in CellIterator(dof_handler)
-        reinit!(cell_values, cell)
-        fill!(Ke, 0)
-
-        periodic_cell_dofs = apply_inverse_constraint_map(op.basis, celldofs(cell), :ψ)
-
-        pot_interpol = ϕ_evals * op.potential[periodic_cell_dofs]
-        dΩ = getdetJdV.([cell_values], 1:n_quad)
-
-        for i in 1:n_basefuncs, j in 1:n_basefuncs
-            Ke[i, j] += (ϕ_evals[:, i] .* ϕ_evals[:, j] .* pot_interpol)' * dΩ
-        end
-    
-        assemble!(assembler, celldofs(cell), Ke)
+    VTM_ρ = op.potential' * M_ρ
+    out_cols = []
+    for R_col in eachcol(R)
+        R_copy = copy(R)
+        R_copy.nzval .= R_copy.nzval .* R_col[R_copy.rowval]
+        push!(out_cols, (VTM_ρ * R_copy)')
     end
-
-    Ferrite.apply!(H, constr_handler)
-
-    free_dofs = get_free_dofs(op.basis, :ψ)
-    H[free_dofs, free_dofs]
+    hcat(out_cols...)
 end
 
 #"""
@@ -139,6 +120,7 @@ Hψ = |ϕ_i><ϕ_i|-1/2 Δ|ψ>.
 """
 struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
     basis::FiniteElementBasis{T}
+    kpoint::FEMKPoint{T}
 end
 function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
     laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)

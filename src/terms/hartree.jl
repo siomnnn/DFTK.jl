@@ -69,17 +69,13 @@ end
                                             ψ, occupation; ρ, kwargs...) where {T}
     # the zero-mean condition necessary for the linear system to have solutions
     # is different from the zero-mean condition on the Hartree potential itself
-    means_diff = sum(ρ)/get_n_free_dofs(basis, :ρ) - basis.model.n_electrons/basis.model.unit_cell_volume
-    ρ_zero_mean = ρ .- sum(ρ)/get_n_free_dofs(basis, :ρ)
+    ρtot = total_density_FEM(ρ)
+    means_diff = sum(ρtot)/get_n_free_dofs(basis, :ρ) - basis.model.n_electrons/basis.model.unit_cell_volume
+    ρ_zero_mean = 8pi * (ρtot .- sum(ρ)/get_n_free_dofs(basis, :ρ))
     pot = solve_laplace(basis, ρ_zero_mean, :ρ)*term.scaling_factor .+ means_diff
+    E = dot(pot, get_overlap_matrix(basis, :ρ), ρtot) / 2
 
-    ops = [FEMRealSpaceMultiplication(basis, pot)]
-
-    dof_handler = get_dof_handler(basis, :ρ)
-    cell_values = get_cell_values(basis, :ρ)
-
-    E = dot(pot, get_overlap_matrix(basis, :ρ), ρ) / 2
-    
+    ops = [FEMRealSpaceMultiplication(basis, kpt, pot) for kpt in basis.kpoints]
     (; E, ops)
 end
 

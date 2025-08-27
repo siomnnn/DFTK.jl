@@ -172,7 +172,6 @@ function xc_potential_real(term::TermXc, basis::FiniteElementBasis{T}, ψ, occup
         ρ = ρ + term.ρcore
     end
 
-    # Compute kinetic energy density, if needed.
     if isnothing(τ) && needs_τ(term)
         throw(ArgumentError("TermXc needs the kinetic energy density τ. Please pass a `τ` " *
                             "keyword argument to your `Hamiltonian` or `energy_hamiltonian` call."))
@@ -223,7 +222,8 @@ end
     E, Vxc, Vτ = xc_potential_real(term, basis, ψ, occupation; ρ, τ)
 
     isnothing(Vτ) || error("Exchange-correlation functionals requiring the kinetic energy density τ are not yet implemented for FEM bases.")
-    ops = [FEMRealSpaceMultiplication(basis, Vxc)]
+    ops = [FEMRealSpaceMultiplication(basis, kpt, Vxc[:, kpt.spin])
+           for kpt in basis.kpoints]
     (; E, ops)
 end
 
@@ -435,7 +435,7 @@ function LibxcDensities(basis::FiniteElementBasis, max_derivative::Integer, ρ, 
     Δρ_real   = nothing
     τ_Libxc   = nothing
 
-    ρ_real = reshape(ρ, (1, size(ρ)...))
+    ρ_real = permutedims(ρ, (2, 1))
 
     LibxcDensitiesFEM(basis, max_derivative, ρ_real, ∇ρ_real, σ_real, Δρ_real, τ_Libxc)
 end

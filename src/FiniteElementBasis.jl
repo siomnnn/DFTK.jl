@@ -3,6 +3,12 @@ using FerriteGmsh
 using Gmsh: gmsh
 using Krylov
 
+# temporary, rudimentary implementation of k-points for FEM
+struct FEMKPoint{T <: Real}
+    spin::Int
+    coordinate::Vec3{T}
+end
+
 @doc raw"""
 A finite-element discretized `Model`.
 """
@@ -27,6 +33,9 @@ struct FiniteElementBasis{T,
 
     refinement_matrix::AbstractMatrix{T}        # Matrix to refine a function from the coarser ψ interpolation to the finer ρ interpolation (ψ_fine = refinement_matrix * ψ_coarse).
     
+    kpoints::Vector{FEMKPoint{T}}
+    kweights::Vector{T}
+
     ## Information on the hardware and device used for computations.
     architecture::Arch
 
@@ -39,9 +48,12 @@ function FiniteElementBasis(model::Model{T, VT},
                             h::T,
                             degree::Int,
                             discretization::FEMDiscretization{T},
+                            kpoints::Vector{FEMKPoint{T}},
+                            kweights::Vector{T},
                             precompute_laplacian::Bool,
                             architecture::Arch,
                            ) where {T, VT, Arch}
+    @assert length(kpoints) == length(kweights) "kpoints and kweights must have the same length"
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
     ψ_overlap_matrix = init_overlap_matrix(discretization, :ψ)
@@ -58,7 +70,8 @@ function FiniteElementBasis(model::Model{T, VT},
     basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization,
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
-                                           refinement_matrix, architecture, terms)
+                                           refinement_matrix, kpoints, kweights,
+                                           architecture, terms)
 
     # TODO: make terms work
     #for (it, t) in enumerate(model.term_types)
@@ -87,6 +100,8 @@ disabled by setting `precompute_laplacian=false`.
                                     h::T,
                                     degree::Int=1,
                                     grid=nothing,
+                                    kpoints::Vector{FEMKPoint{T}}=[FEMKPoint(1, Vec3{T}(0, 0, 0))],
+                                    kweights::Vector{T}=[one(T)],
                                     precompute_laplacian=true,
                                     architecture=CPU(),
                                     write_to_file=false,
@@ -99,7 +114,7 @@ disabled by setting `precompute_laplacian=false`.
     end
     discretization = FEMDiscretization(model.lattice, grid; degree)
 
-    FiniteElementBasis(model, austrip(h), degree, discretization, precompute_laplacian, architecture)
+    FiniteElementBasis(model, austrip(h), degree, discretization, kpoints, kweights, precompute_laplacian, architecture)
 end
 
 # prevent broadcast

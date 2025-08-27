@@ -24,12 +24,11 @@ end
 @timing "ene_ops: FEM local" function ene_ops(term::TermLocalPotential,
                                           basis::FiniteElementBasis{T}, ψ, occupation;
                                           kwargs...) where {T}
-    ops = [FEMRealSpaceMultiplication(basis, term.potential_values)]
-
+    potview(data, spin) = ndims(data) == 4 ? (@view data[:, :, :, spin]) : data
+    ops = [FEMRealSpaceMultiplication(basis, kpt, potview(term.potential_values, kpt.spin))
+           for kpt in basis.kpoints]
     if :ρ in keys(kwargs)
-        ρ = kwargs[:ρ]
-        
-        E = dot(ρ, get_overlap_matrix(basis, :ρ), term.potential_values)
+        E = dot(total_density_FEM(kwargs[:ρ]), get_overlap_matrix(basis, :ρ), term.potential_values)
     else
         E = T(Inf)
     end

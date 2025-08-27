@@ -71,16 +71,18 @@ end
 
 @timing "ene_ops: FEM kinetic" function ene_ops(term::TermKineticFEM, basis::FiniteElementBasis{T},
                                             ψ, occupation; kwargs...) where {T}
-    ops = [NegHalfLaplaceFEMOperator(basis)]
+    ops = [NegHalfLaplaceFEMOperator(basis, kpoint)
+           for kpoint in basis.kpoints]
     if isnothing(ψ) || isnothing(occupation)
         return (; E=T(Inf), ops)
     end
-    occ = to_cpu(occupation)
+    occupation = [to_cpu(occk) for occk in occupation]
 
     E = zero(T)
-    for iband = 1:size(ψ, 2)
-        ψn = @views ψ[:, iband]
-        E += occ[iband] * dot(ψn, get_neg_half_laplace_matrix(basis, :ψ), ψn)
+    for (ik, ψk) in enumerate(ψ)
+        for (iband, ψnk) in enumerate(eachcol(ψk))
+            E += basis.kweights[ik] * occupation[ik][iband] * dot(ψnk, get_neg_half_laplace_matrix(basis, :ψ), ψnk)
+        end
     end
 
     (; E, ops)
