@@ -57,17 +57,30 @@ end
                                         occupation_threshold=zero(T)) where {T,VT}
 
     Tρ = promote_type(T, real(eltype(ψ[1])))
+    Tψ = promote_type(VT, real(eltype(ψ[1])))
 
     occupation = [to_cpu(oc) for oc in occupation]
     mask_occ = [findall(occnk -> abs(occnk) ≥ occupation_threshold, occk)
                 for occk in occupation]
 
-    ρ = zeros(Tρ, get_n_free_dofs(basis, :ρ), basis.model.n_spin_components)
-    for ik in eachindex(basis.kpoints), n in mask_occ[ik]
-        kpt = basis.kpoints[ik]
-        ψ_fine = get_refinement_matrix(basis) * ψ[ik][:, n]
-        ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs.(ψ_fine).^2)
+    function allocate_local_storage()
+        (; ρ=zeros(Tρ, get_n_free_dofs(basis, :ρ), basis.model.n_spin_components),
+         ψnk_fine=zeros(complex(Tψ), get_n_free_dofs(basis, :ρ)))
     end
+    # We split the total iteration range (ik, n) in chunks, and parallelize over them.
+    range = [(ik, n) for ik = 1:length(basis.kpoints) for n = mask_occ[ik]]
+
+    storages = parallel_loop_over_range(range; allocate_local_storage) do kn, storage
+        (ik, n) = kn
+        kpt = basis.kpoints[ik]
+        mul!(storage.ψnk_fine, get_refinement_matrix(basis),  ψ[ik][:, n])
+        storage.ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_fine))
+
+        synchronize_device(basis.architecture)
+    end
+    ρ = sum(getfield.(storages, :ρ))
+
+    # TODO: MPI
 
     # There can always be small negative densities, e.g. due to numerical fluctuations
     # in a vacuum region, so put some tolerance even if occupation_threshold == 0
