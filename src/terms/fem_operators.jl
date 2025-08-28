@@ -76,10 +76,10 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
     VTM_ρ = op.potential' * M_ρ
     Rψ = R * ψ
 
-    R_copy = copy(R)
+    R_copy = Complex.(R)
     R_copy.nzval .= R_copy.nzval .* Rψ[R_copy.rowval]       # SparseArrays isn't smart enough to optimize terms with structural zeros, wayyy faster than R .* Rψ
 
-    Hψ .+= (VTM_ρ * R_copy)'
+    Hψ .+= transpose(VTM_ρ * R_copy)
 end
 function Matrix(op::FEMRealSpaceMultiplication)
     M_ρ = get_overlap_matrix(op.basis, :ρ)
@@ -88,7 +88,7 @@ function Matrix(op::FEMRealSpaceMultiplication)
     VTM_ρ = op.potential' * M_ρ
     out_cols = []
     for R_col in eachcol(R)
-        R_copy = copy(R)
+        R_copy = Complex.(R)
         R_copy.nzval .= R_copy.nzval .* R_col[R_copy.rowval]
         push!(out_cols, (VTM_ρ * R_copy)')
     end
@@ -124,8 +124,9 @@ struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
 end
 function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
     laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)
+    constraint_matrix = get_constraint_matrix(op.basis, op.kpoint, :ψ)
     if !isnothing(laplace_matrix)
-        Hψ .+= laplace_matrix * ψ
+        Hψ .+= constraint_matrix' * laplace_matrix * constraint_matrix * ψ
         return
     end
 

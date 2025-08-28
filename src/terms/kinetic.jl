@@ -80,8 +80,10 @@ end
 
     E = zero(T)
     for (ik, ψk) in enumerate(ψ)
+        constraint_matrix = get_constraint_matrix(basis, basis.kpoints[ik], :ψ)
         for (iband, ψnk) in enumerate(eachcol(ψk))
-            E += basis.kweights[ik] * occupation[ik][iband] * dot(ψnk, get_neg_half_laplace_matrix(basis, :ψ), ψnk)
+            ψnk_per = constraint_matrix * ψnk
+            E += basis.kweights[ik] * occupation[ik][iband] * dot(ψnk_per, get_neg_half_laplace_matrix(basis, :ψ), ψnk_per)
         end
     end
 

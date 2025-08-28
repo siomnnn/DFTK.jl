@@ -219,6 +219,7 @@ get_n_dofs(basis::FiniteElementBasis, field::Symbol) = get_n_dofs(basis.discreti
 get_n_free_dofs(basis::FiniteElementBasis, field::Symbol) = get_n_free_dofs(basis.discretization, field)
 get_free_dofs(basis::FiniteElementBasis, field::Symbol) = get_free_dofs(basis.discretization, field)
 get_dof_handler(basis::FiniteElementBasis, field::Symbol) = get_dof_handler(basis.discretization, field)
+get_periodic_dofset(basis::FiniteElementBasis, field::Symbol) = get_periodic_dofset(basis.discretization, field)
 get_constraint_handler(basis::FiniteElementBasis, field::Symbol) = get_constraint_handler(basis.discretization, field)
 get_cell_values(basis::FiniteElementBasis, field::Symbol) = get_cell_values(basis.discretization, field)
 get_inverse_constraint_map(basis::FiniteElementBasis, field::Symbol) = get_inverse_constraint_map(basis.discretization, field)
@@ -239,6 +240,40 @@ function get_neg_half_laplace_matrix(basis::FiniteElementBasis, field::Symbol)
     end
 end
 
+function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKPoint{T}, field::Symbol) where {T}
+    lattice = basis.model.lattice
+    k = kpoint.coordinate
+
+    ch = get_constraint_handler(basis, field)
+    
+    I, J, vals = Int[], Int[], Complex{T}[]
+
+    for (j, d) in enumerate(ch.free_dofs)
+        push!(I, d)
+        push!(J, j)
+        push!(vals, 1.0)
+    end
+
+    periodic_dofset = get_periodic_dofset(basis.discretization, field)
+
+    for (i, pdof) in enumerate(ch.prescribed_dofs)
+        dofcoef = ch.dofcoefficients[i]
+        if dofcoef !== nothing
+            @assert length(dofcoef) == 1
+            (d, _) = dofcoef[1]
+            push!(I, pdof)
+            j = searchsortedfirst(ch.free_dofs, d)
+            push!(J, j)
+
+            lattice_dir = [pdof in periodic_dofset[i] for i in 1:3]
+            phase = exp(im * dot(k, lattice * lattice_dir))
+            push!(vals, phase)
+        end
+    end
+
+    return SparseArrays.sparse!(I, J, vals, get_n_dofs(basis, field), get_n_free_dofs(basis, field))
+end
+
 function get_overlap_matrix(basis::FiniteElementBasis, field::Symbol)
     if field == :ψ
         return basis.ψ_overlap_matrix
@@ -254,7 +289,8 @@ get_refinement_matrix(basis::FiniteElementBasis) = basis.refinement_matrix
 LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ψ, get_overlap_matrix(basis, field), ψ)^0.5
 
 function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
-    mat = get_neg_half_laplace_matrix(basis, field)
+    constraint_matrix = get_constraint_matrix(basis, FEMKPoint(1, Vec3{T}(0, 0, 0)), field)
+    mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, field) * constraint_matrix
     if !isnothing(mat)
         (x, stats) = minres_qlp(mat, f)
         stats.solved || error("Laplacian solve did not converge")

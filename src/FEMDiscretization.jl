@@ -14,6 +14,8 @@ struct FEMDiscretization{T, S <: Ferrite.AbstractRefShape, C <: Ferrite.Abstract
     grid::Grid{3, C, T}
     ψ_dof_handler::DofHandler{3, Grid{3, C, T}}
     ρ_dof_handler::DofHandler{3, Grid{3, C, T}}
+    ψ_per_dofset::Vector{Vector{Int}}
+    ρ_per_dofset::Vector{Vector{Int}}
     ψ_constraint_handler::ConstraintHandler{DofHandler{3, Grid{3, C, T}}, T}
     ρ_constraint_handler::ConstraintHandler{DofHandler{3, Grid{3, C, T}}, T}
     ψ_cell_values::CellValues
@@ -37,6 +39,7 @@ function FEMDiscretization(lattice::Mat3{T},
 
     ψ_dof_handler, ρ_dof_handler = setup_dofs(grid, ψ_ip, :ψ), setup_dofs(grid, ρ_ip, :ρ)
     ψ_cell_values, ρ_cell_values = setup_cell_values(ψ_ip), setup_cell_values(ρ_ip)
+    ψ_per_dofset, ρ_per_dofset = setup_periodic_dofsets(ψ_dof_handler), setup_periodic_dofsets(ρ_dof_handler)
     ψ_constraint_handler, ρ_constraint_handler = setup_periodic_boundaries(lattice, ψ_dof_handler, ρ_dof_handler)
 
     ψ_inverse_constraint_map, ρ_inverse_constraint_map = setup_inverse_constraint_map(ψ_constraint_handler), setup_inverse_constraint_map(ρ_constraint_handler)
@@ -44,6 +47,7 @@ function FEMDiscretization(lattice::Mat3{T},
     dof_map = setup_dof_map(ψ_dof_handler, ρ_dof_handler, ψ_cell_values, ψ_inverse_constraint_map, ρ_inverse_constraint_map)
 
     return FEMDiscretization{T, S, C}(lattice, grid, ψ_dof_handler, ρ_dof_handler,
+                                      ψ_per_dofset, ρ_per_dofset,
                                       ψ_constraint_handler, ρ_constraint_handler,
                                       ψ_cell_values, ρ_cell_values,
                                       ψ_inverse_constraint_map, ρ_inverse_constraint_map,
@@ -72,6 +76,32 @@ function setup_cell_values(ip::Interpolation{S}; degree=2) where {S <: Ferrite.A
     qr = QuadratureRule{S}(degree)
     cv = CellValues(qr, ip)
     return cv
+end
+
+function get_dofs_on_facetset(dh::DofHandler, facetset::String)
+    dofs = Int[]
+    field_name = dh.field_names[1]
+    field_ip = Ferrite.getfieldinterpolation(dh, Ferrite.find_field(dh, field_name))
+
+    for facet_id in getfacetset(dh.grid, facetset)
+        cell_id, local_facet_id = facet_id
+        local_facet_dofs = Ferrite.facedof_indices(field_ip)[local_facet_id]
+        for index in local_facet_dofs
+            push!(dofs, celldofs(dh, cell_id)[index])
+        end
+    end
+
+    unique!(dofs)
+    sort!(dofs)
+    return dofs
+end
+
+function setup_periodic_dofsets(dh::DofHandler)
+    per_dofsets = Vector{Vector{Int}}(undef, 3)
+    for i in 1:3
+        per_dofsets[i] = get_dofs_on_facetset(dh, "periodic_$(i)b")
+    end
+    return per_dofsets
 end
 
 function setup_periodic_boundaries(lattice::Mat3, ψ_dh::DofHandler, ρ_dh::DofHandler)
@@ -136,6 +166,16 @@ function get_dof_handler(disc::FEMDiscretization, field::Symbol)
         return disc.ψ_dof_handler
     elseif field == :ρ
         return disc.ρ_dof_handler
+    else
+        error("Invalid field: $field. Only :ψ and :ρ are supported.")
+    end
+end
+
+function get_periodic_dofset(disc::FEMDiscretization, field::Symbol)
+    if field == :ψ
+        return disc.ψ_per_dofset
+    elseif field == :ρ
+        return disc.ρ_per_dofset
     else
         error("Invalid field: $field. Only :ψ and :ρ are supported.")
     end
@@ -242,11 +282,7 @@ function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T
     
         assemble!(assembler, celldofs(cell), Ke)
     end
-
-    Ferrite.apply!(neg_half_laplace, ch)
-
-    free_dofs = get_free_dofs(disc, field)
-    neg_half_laplace[free_dofs, free_dofs]
+    neg_half_laplace
 end
 
 function init_refinement_matrix(disc::FEMDiscretization{T}) where T
@@ -275,8 +311,8 @@ function init_refinement_matrix(disc::FEMDiscretization{T}) where T
             push!(vals, ref_evals_ψ[i_ρ, i_ψ])
         end
     end
-    return sparse(ρ_inds, ψ_inds, vals, get_n_free_dofs(disc, :ρ), get_n_free_dofs(disc, :ψ), max)      # max filters out duplicate entries. Values should be equal anyways,
-                                                                                                        # but by default sparse sums them up, which we have to prevent.
+    return sparse(ρ_inds, ψ_inds, vals, get_n_free_dofs(disc, :ρ), get_n_free_dofs(disc, :ψ), (x, y) -> x)      # filters out duplicate entries. Values should be equal anyways,
+                                                                                                                # but by default sparse sums them up, which we have to prevent.
 end
 
 function get_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T
