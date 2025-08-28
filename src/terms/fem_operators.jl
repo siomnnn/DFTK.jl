@@ -41,7 +41,7 @@ Useful for energy terms that don't depend on the orbitals at all (eg nuclei-nucl
 """
 struct NoopFEMOperator{T <: Real} <: FEMOperator
     basis::FiniteElementBasis{T}
-    kpoint::FEMKPoint{T}
+    kpoint::FEMKpoint{T}
 end
 apply!(Hψ, op::NoopFEMOperator, ψ) = nothing
 function Matrix(op::NoopFEMOperator)
@@ -62,7 +62,7 @@ Hψ = |ϕ_i><ϕ_i|V|ψ>.
 """
 struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     basis::FiniteElementBasis{T}
-    kpoint::FEMKPoint{T}
+    kpoint::FEMKpoint{T}
     potential::AT
 end
 # We have to compute <ϕ_i|V|ψ> = ∫ ϕ_i(r) V(r) ψ(r) dr for ψ(r) = Σ_j ϕ_j(r) ψ_j, V(r) = Σ_k χ_k(r) V_k, where ϕ_i are
@@ -120,7 +120,7 @@ Hψ = |ϕ_i><ϕ_i|-1/2 Δ|ψ>.
 """
 struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
     basis::FiniteElementBasis{T}
-    kpoint::FEMKPoint{T}
+    kpoint::FEMKpoint{T}
 end
 function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
     laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)

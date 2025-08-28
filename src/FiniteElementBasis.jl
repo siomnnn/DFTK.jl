@@ -4,7 +4,7 @@ using Gmsh: gmsh
 using Krylov
 
 # temporary, rudimentary implementation of k-points for FEM
-struct FEMKPoint{T <: Real}
+struct FEMKpoint{T <: Real}
     spin::Int
     coordinate::Vec3{T}
 end
@@ -33,7 +33,7 @@ struct FiniteElementBasis{T,
 
     refinement_matrix::AbstractMatrix{T}        # Matrix to refine a function from the coarser ψ interpolation to the finer ρ interpolation (ψ_fine = refinement_matrix * ψ_coarse).
     
-    kpoints::Vector{FEMKPoint{T}}
+    kpoints::Vector{FEMKpoint{T}}
     kweights::Vector{T}
 
     ## Information on the hardware and device used for computations.
@@ -48,7 +48,7 @@ function FiniteElementBasis(model::Model{T, VT},
                             h::T,
                             degree::Int,
                             discretization::FEMDiscretization{T},
-                            kpoints::Vector{FEMKPoint{T}},
+                            kpoints::Vector{FEMKpoint{T}},
                             kweights::Vector{T},
                             precompute_laplacian::Bool,
                             architecture::Arch,
@@ -73,11 +73,10 @@ function FiniteElementBasis(model::Model{T, VT},
                                            refinement_matrix, kpoints, kweights,
                                            architecture, terms)
 
-    # TODO: make terms work
-    #for (it, t) in enumerate(model.term_types)
-    #    term_name = string(nameof(typeof(t)))
-    #    @timing "Instantiation $term_name" basis.terms[it] = t(basis)
-    #end
+    for (it, t) in enumerate(model.term_types)
+        term_name = string(nameof(typeof(t)))
+        @timing "Instantiation $term_name" basis.terms[it] = t(basis)
+    end
     basis
 end
 
@@ -97,10 +96,10 @@ By default, the matrix representation of the Laplacian operator is precomputed. 
 disabled by setting `precompute_laplacian=false`.
 """
 @timing function FiniteElementBasis(model::Model{T};
-                                    h::T,
+                                    h::Number,
                                     degree::Int=1,
                                     grid=nothing,
-                                    kpoints::Vector{FEMKPoint{T}}=[FEMKPoint(1, Vec3{T}(0, 0, 0))],
+                                    kpoints::Vector{FEMKpoint{T}}=[FEMKpoint(1, Vec3{T}(0, 0, 0))],
                                     kweights::Vector{T}=[one(T)],
                                     precompute_laplacian=true,
                                     architecture=CPU(),
@@ -240,7 +239,7 @@ function get_neg_half_laplace_matrix(basis::FiniteElementBasis, field::Symbol)
     end
 end
 
-function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKPoint{T}, field::Symbol) where {T}
+function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T}, field::Symbol) where {T}
     lattice = basis.model.lattice
     k = kpoint.coordinate
 
@@ -289,7 +288,7 @@ get_refinement_matrix(basis::FiniteElementBasis) = basis.refinement_matrix
 LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ψ, get_overlap_matrix(basis, field), ψ)^0.5
 
 function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
-    constraint_matrix = get_constraint_matrix(basis, FEMKPoint(1, Vec3{T}(0, 0, 0)), field)
+    constraint_matrix = get_constraint_matrix(basis, FEMKpoint(1, Vec3{T}(0, 0, 0)), field)
     mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, field) * constraint_matrix
     if !isnothing(mat)
         (x, stats) = minres_qlp(mat, f)
@@ -301,4 +300,9 @@ function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field
     (x, stats) = minres_qlp(op, f)
     stats.solved || error("Laplacian solve did not converge")
     return x
+end
+
+# not assuming that kpoints are sorted by spin, since they are user-specified.
+function krange_spin(basis::FiniteElementBasis, spin::Integer)
+    findall(kpt -> kpt.spin == spin, basis.kpoints)
 end

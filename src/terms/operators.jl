@@ -163,7 +163,7 @@ function optimize_operators(ops)
     RSFEMmults = [op for op in ops if op isa FEMRealSpaceMultiplication]
     isempty(RSmults) && isempty(RSFEMmults) && return ops
 
-    nonRSmults = [op for op in ops if !(op isa RealSpaceMultiplication)]
+    nonRSmults = [op for op in ops if !(op isa RealSpaceMultiplication) && !(op isa FEMRealSpaceMultiplication)]
 
     if isempty(RSFEMmults)
         combined_RSmults = RealSpaceMultiplication(RSmults[1].basis,
