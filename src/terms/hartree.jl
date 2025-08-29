@@ -70,10 +70,8 @@ end
     # the zero-mean condition necessary for the linear system to have solutions
     # is different from the zero-mean condition on the Hartree potential itself
     ρtot = total_density_FEM(ρ)
-    ρ_mean = sum(ρtot)/get_n_free_dofs(basis, :ρ)
-    theoretical_mean = basis.model.n_electrons/basis.model.unit_cell_volume
-    ρ_zero_mean = 8pi * (ρtot .- ρ_mean)
-    pot = solve_laplace(basis, ρ_zero_mean, :ρ)*term.scaling_factor .+ (theoretical_mean - ρ_mean)
+    ρ_zero_mean = 2pi * (ρtot .- basis.model.n_electrons / basis.model.unit_cell_volume)
+    pot = solve_laplace(basis, ρ_zero_mean, :ρ)*term.scaling_factor
     E = dot(pot, get_overlap_matrix(basis, :ρ), ρtot) / 2
 
     ops = [FEMRealSpaceMultiplication(basis, kpt, pot) for kpt in basis.kpoints]

@@ -293,14 +293,15 @@ integrate(f::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) whe
 function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
     constraint_matrix = get_constraint_matrix(basis, FEMKpoint(1, Vec3{T}(0, 0, 0)), field)
     mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, field) * constraint_matrix
+    rhs = complex.(get_overlap_matrix(basis, :ρ) * f)
     if !isnothing(mat)
-        (x, stats) = minres_qlp(mat, complex.(f))
+        (x, stats) = minres_qlp(mat, rhs)
         stats.solved || error("Laplacian solve did not converge")
         return real.(x)
     end
 
     op = NegHalfLaplaceFEMOperator(basis)
-    (x, stats) = minres_qlp(op, complex.(f))
+    (x, stats) = minres_qlp(op, rhs)
     stats.solved || error("Laplacian solve did not converge")
     return real.(x)
 end
