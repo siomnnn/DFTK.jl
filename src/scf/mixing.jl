@@ -28,6 +28,7 @@ Simple mixing: ``J^{-1} ≈ 1``
 """
 struct SimpleMixing <: Mixing; end
 mix_density(::SimpleMixing, ::PlaneWaveBasis, δF; kwargs...) = δF
+mix_density(::SimpleMixing, ::FiniteElementBasis, δF; kwargs...) = δF
 
 
 @doc raw"""

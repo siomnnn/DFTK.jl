@@ -51,11 +51,11 @@ end
 Obtain new density ρ by diagonalizing `ham`. Follows the policy imposed by the `bands`
 data structure to determine and adjust the number of bands to be computed.
 """
-function next_density(ham::Hamiltonian,
+function next_density(ham::Hamiltonian{B},
                       nbandsalg::NbandsAlgorithm=AdaptiveBands(ham.basis.model),
                       fermialg::AbstractFermiAlgorithm=default_fermialg(ham.basis.model);
                       eigensolver=lobpcg_hyper, ψ=nothing, eigenvalues=nothing,
-                      occupation=nothing, kwargs...)
+                      occupation=nothing, kwargs...) where {B <: PlaneWaveBasis}
     n_bands_converge, n_bands_compute = determine_n_bands(nbandsalg, occupation,
                                                           eigenvalues, ψ)
 
@@ -94,6 +94,53 @@ function next_density(ham::Hamiltonian,
     (; ψ=eigres.X, eigenvalues=eigres.λ, occupation, εF, ρout, diagonalization=eigres,
      n_bands_converge, nbandsalg.occupation_threshold,
      n_matvec=mpi_sum(eigres.n_matvec, ham.basis.comm_kpts))
+end
+
+# Same problem as with the SCF. Can't reuse for now because FEM doesn't do MPI, but otherwise exactly the same.
+# TODO: Make FEM support MPI and then unify with the above.
+function next_density(ham::Hamiltonian{B},
+                      nbandsalg::NbandsAlgorithm=AdaptiveBands(ham.basis.model),
+                      fermialg::AbstractFermiAlgorithm=default_fermialg(ham.basis.model);
+                      eigensolver=lobpcg_hyper, ψ=nothing, eigenvalues=nothing,
+                      occupation=nothing, kwargs...) where {B <: FiniteElementBasis}
+    n_bands_converge, n_bands_compute = determine_n_bands(nbandsalg, occupation,
+                                                          eigenvalues, ψ)
+
+    if isnothing(ψ)
+        increased_n_bands = true
+    else
+        @assert length(ψ) == length(ham.basis.kpoints)
+        n_bands_compute = max(n_bands_compute, maximum(ψk -> size(ψk, 2), ψ))
+        increased_n_bands = n_bands_compute > size(ψ[1], 2)
+    end
+
+    # TODO Synchronize since right now it is assumed that the same number of bands are
+    #      computed for each k-Point
+    n_bands_compute = maximum(n_bands_compute)
+
+    eigres = diagonalize_all_kblocks(eigensolver, ham, n_bands_compute;
+                                     ψguess=ψ, n_conv_check=n_bands_converge, kwargs...)
+    eigres.converged || (@warn "Eigensolver not converged" n_iter=eigres.n_iter)
+
+    # Check maximal occupation of the unconverged bands is sensible.
+    occupation, εF = compute_occupation(ham.basis, eigres.λ, fermialg;
+                                        tol_n_elec=nbandsalg.occupation_threshold)
+    minocc = maximum(minimum, occupation)
+
+    # TODO This is a bit hackish, but needed right now as we increase the number of bands
+    #      to be computed only between SCF steps. Should be revisited once we have a better
+    #      way to deal with such things in LOBPCG.
+    if !increased_n_bands && minocc > nbandsalg.occupation_threshold
+        @warn("Detected large minimal occupation $minocc. SCF could be unstable. " *
+              "Try switching to adaptive band selection (`nbandsalg=AdaptiveBands(model)`) " *
+              "or request more converged bands than $n_bands_converge (e.g. " *
+              "`nbandsalg=AdaptiveBands(model; n_bands_converge=$(n_bands_converge + 3)`)")
+    end
+
+    ρout = compute_density(ham.basis, eigres.X, occupation; nbandsalg.occupation_threshold)
+    (; ψ=eigres.X, eigenvalues=eigres.λ, occupation, εF, ρout, diagonalization=eigres,
+     n_bands_converge, nbandsalg.occupation_threshold,
+     n_matvec=sum(eigres.n_matvec))
 end
 
 
@@ -202,6 +249,106 @@ Overview of parameters:
         info_next = merge(info_next, (; converged))
 
         timedout = MPI.bcast(Dates.now() ≥ timeout_date, MPI.COMM_WORLD)
+        info_next = merge(info_next, (; timedout))
+
+        callback(info_next)
+
+        ρnext, info_next
+    end
+
+    info_init = (; ρin=ρ, τ, ψ, occupation=nothing, eigenvalues=nothing, εF=nothing,
+                   n_iter=0, n_matvec=0, timedout=false, converged=false,
+                   history_Etot=T[], history_Δρ=T[])
+
+    # Convergence is flagged by is_converged inside the fixpoint_map.
+    _, info = solver(fixpoint_map, ρ, info_init; maxiter)
+
+    # We do not use the return value of solver but rather the one that got updated by fixpoint_map
+    # ψ is consistent with ρout, so we return that. We also perform a last energy computation
+    # to return a correct variational energy
+    (; ρin, ρout, τ, ψ, occupation, eigenvalues, εF, converged) = info
+    energies, ham = energy_hamiltonian(basis, ψ, occupation; ρ=ρout, τ, eigenvalues, εF)
+
+    # Callback is run one last time with final state to allow callback to clean up
+    scfres = (; ham, basis, energies, converged, nbandsalg.occupation_threshold,
+                ρ=ρout, τ, α=damping, eigenvalues, occupation, εF, info.n_bands_converge,
+                info.n_iter, info.n_matvec, ψ, info.diagonalization, stage=:finalize,
+                info.history_Δρ, info.history_Etot, info.timedout, mixing,
+                runtime_ns=time_ns() - start_ns, algorithm="SCF")
+    callback(scfres)
+    scfres
+end
+
+# FiniteElementBasis version. Only special-cased because MPI and τ-based XC functionals aren't implemented for FEM yet.
+# TODO: unify with PlaneWaveBasis version above once those are implemented for FEM
+@timing function self_consistent_field(
+    basis::FiniteElementBasis{T};
+    ρ=guess_density(basis, RandomDensity()),    # TODO: better guess method
+    τ=nothing,
+    ψ=nothing,
+    tol=1e-6,
+    is_converged=ScfConvergenceDensity(tol),
+    miniter=0,
+    maxiter=100,
+    maxtime=Year(1),
+    mixing=SimpleMixing(),                      # TODO: better default mixing
+    damping=0.8,
+    solver=scf_anderson_solver(),
+    eigensolver=lobpcg_hyper,
+    diagtolalg=default_diagtolalg(basis; tol),
+    nbandsalg::NbandsAlgorithm=AdaptiveBands(basis.model),
+    fermialg::AbstractFermiAlgorithm=default_fermialg(basis.model),
+    callback=ScfDefaultCallback(; show_damping=false),
+    compute_consistent_energies=true,
+    response=ResponseOptions(),  # Dummy here, only for AD
+) where {T}
+    if !isnothing(ψ)
+        @assert length(ψ) == length(basis.kpoints)
+    end
+    start_ns = time_ns()
+    timeout_date = Dates.now() + maxtime
+
+    # We do density mixing in the real representation
+    # TODO support other mixing types
+    function fixpoint_map(ρin, info)
+        (; ψ, occupation, eigenvalues, εF, n_iter, converged, timedout, τ) = info
+        n_iter += 1
+
+        # Note that ρin is not the density of ψ, and the eigenvalues
+        # are not the self-consistent ones, which makes this energy non-variational
+        energies, ham = energy_hamiltonian(basis, ψ, occupation; ρ=ρin, τ, eigenvalues, εF)
+
+        # Diagonalize `ham` to get the new state
+        nextstate = next_density(ham, nbandsalg, fermialg; eigensolver, ψ, eigenvalues,
+                                 occupation, miniter=1,
+                                 tol=determine_diagtol(diagtolalg, info))
+        (; ψ, eigenvalues, occupation, εF, ρout) = nextstate
+        Δρ = ρout - ρin
+
+        @assert !any(needs_τ, basis.terms) "FiniteElementBasis does not support τ-based functionals yet."
+
+        # Update info with results gathered so far
+        info_next = (; ham, basis, converged, stage=:iterate, algorithm="SCF",
+                       ρin, τ, α=damping, n_iter, nbandsalg.occupation_threshold,
+                       runtime_ns=time_ns() - start_ns, nextstate...,
+                       diagonalization=[nextstate.diagonalization])
+
+        # Compute the energy of the new state
+        if compute_consistent_energies
+            (; energies) = energy(basis, ψ, occupation; ρ=ρout, τ, eigenvalues, εF)
+        end
+        history_Etot = vcat(info.history_Etot, energies.total)
+        history_Δρ = vcat(info.history_Δρ, norm(Δρ, basis, :ρ))
+        n_matvec = info.n_matvec + nextstate.n_matvec
+        info_next = merge(info_next, (; energies, history_Etot, history_Δρ, n_matvec))
+
+        # Apply mixing and pass it the full info as kwargs
+        ρnext = ρin .+ T(damping) .* mix_density(mixing, basis, Δρ; info_next...)
+
+        converged = n_iter ≥ miniter && is_converged(info_next)
+        info_next = merge(info_next, (; converged))
+
+        timedout = Dates.now() ≥ timeout_date
         info_next = merge(info_next, (; timedout))
 
         callback(info_next)

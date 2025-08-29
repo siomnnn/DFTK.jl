@@ -20,14 +20,14 @@ default_fermialg(::Smearing.Gaussian)   = FermiBisection()  # Monotonic smearing
 default_fermialg(::Smearing.FermiDirac) = FermiBisection()  # Monotonic smearing
 default_fermialg(model::Model)          = default_fermialg(model.smearing)
 
-function excess_n_electrons(basis::PlaneWaveBasis, eigenvalues, εF; smearing, temperature)
+function excess_n_electrons(basis::AbstractBasis, eigenvalues, εF; smearing, temperature)
     occupation = compute_occupation(basis, eigenvalues, εF;
                                     smearing, temperature).occupation
     weighted_ksum(basis, sum.(occupation)) - basis.model.n_electrons
 end
 
 """Compute occupation given eigenvalues and Fermi level"""
-function compute_occupation(basis::PlaneWaveBasis{T}, eigenvalues::AbstractVector, εF::Number;
+function compute_occupation(basis::AbstractBasis{T}, eigenvalues::AbstractVector, εF::Number;
                             temperature=basis.model.temperature,
                             smearing=basis.model.smearing) where {T}
     # This is needed to get the right behaviour for special floating-point types
@@ -45,7 +45,7 @@ end
 """Compute occupation and Fermi level given eigenvalues and using `fermialg`.
 The `tol_n_elec` gives the accuracy on the electron count which should be at least achieved.
 """
-function compute_occupation(basis::PlaneWaveBasis{T}, eigenvalues::AbstractVector,
+function compute_occupation(basis::AbstractBasis{T}, eigenvalues::AbstractVector,
                             fermialg::AbstractFermiAlgorithm=default_fermialg(basis.model);
                             tol_n_elec=default_occupation_threshold(T),
                             temperature=basis.model.temperature,
@@ -118,13 +118,45 @@ function compute_fermi_level(basis::PlaneWaveBasis{T}, eigenvalues, ::FermiBisec
 
     εF
 end
+# Un-MPI-ified version for FEM again.
+# TODO: unify once MPI is implemented
+function compute_fermi_level(basis::FiniteElementBasis{T}, eigenvalues, ::FermiBisection;
+                             temperature, smearing, tol_n_elec) where {T}
+    if iszero(temperature)
+        return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
+                                   temperature, smearing, tol_n_elec)
+    end
 
+    excess(εF) = excess_n_electrons(basis, eigenvalues, εF; smearing, temperature)
+
+    # Check if band gap is so large that a rough guess based on integer occupations is sufficient.
+    εFint = guess_fermi_level_intocc_(basis, eigenvalues)
+    excess_int = excess(εFint)
+    if abs(excess_int) < tol_n_elec / 10
+        return εFint
+    end
+
+    # Get rough bounds to bracket εF
+    if excess_int < 0
+        min_ε = εFint
+        max_ε = maximum(maximum, eigenvalues) + 1
+    else
+        min_ε = minimum(minimum, eigenvalues) - 1
+        max_ε = εFint
+    end
+
+    @assert excess(min_ε) < 0 < excess(max_ε)
+    εF = Roots.find_zero(excess, (min_ε, max_ε), Roots.Bisection(), atol=eps(T))
+    @assert abs(excess(εF)) ≤ tol_n_elec
+
+    εF
+end
 
 """
 Two-stage Fermi level finding algorithm starting from a Gaussian-smearing guess.
 """
 struct FermiTwoStage <: AbstractFermiAlgorithm end
-function compute_fermi_level(basis::PlaneWaveBasis{T}, eigenvalues, ::FermiTwoStage;
+function compute_fermi_level(basis::AbstractBasis{T}, eigenvalues, ::FermiTwoStage;
                              temperature, smearing, tol_n_elec) where {T}
     if iszero(temperature)
         return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
@@ -145,7 +177,7 @@ end
 # Note: This is not exported, but only called by the above algorithms for
 # the zero-temperature case.
 struct FermiZeroTemperature <: AbstractFermiAlgorithm end
-function compute_fermi_level(basis::PlaneWaveBasis, eigenvalues, ::FermiZeroTemperature;
+function compute_fermi_level(basis::AbstractBasis, eigenvalues, ::FermiZeroTemperature;
                              temperature, smearing, tol_n_elec)
     # Sanity check that we can indeed fill the appropriate number of states
     filled_occ  = filled_occupation(basis.model)
@@ -197,11 +229,33 @@ function guess_fermi_level_intocc_(basis::PlaneWaveBasis, eigenvalues)
         (HOMO + LUMO) / 2
     end
 end
+# Un-MPI-ified version for FEM again.
+# TODO: unify once MPI is implemented
+function guess_fermi_level_intocc_(basis::FiniteElementBasis, eigenvalues)
+    filled_occ = filled_occupation(basis.model)
+    n_spin = basis.model.n_spin_components
+    n_fill = div(basis.model.n_electrons, n_spin * filled_occ, RoundUp)
+
+    # Highest occupied energy level
+    HOMO = maximum([εk[n_fill] for εk in eigenvalues])
+
+    # Lowest unoccupied energy level: not all k-points might have at least n_fill+1
+    # energy levels so we have to take care of that by specifying init to minimum
+    LUMO = minimum(eigenvalues) do εk
+        minimum(εk[n_fill+1:end], init=typemax(HOMO))
+    end
+
+    if LUMO == typemax(HOMO)
+        HOMO + 1  # Just to make sure the εF is a sane number and above HOMO
+    else
+        (HOMO + LUMO) / 2
+    end
+end
 
 """
 Check that all orbitals are fully occupied.
 """
-function check_full_occupation(basis::PlaneWaveBasis, occupation)
+function check_full_occupation(basis::AbstractBasis, occupation)
     filled_occ = filled_occupation(basis.model)
     for occ_k in occupation
         all(occ_k .== filled_occ) || error("Only full occupation is supported, but $occ_k has partial occupation.")

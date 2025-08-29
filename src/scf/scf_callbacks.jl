@@ -51,8 +51,12 @@ function (cb::ScfDefaultCallback)(info)
         # Average number of diagonalizations per k-point needed for this SCF step
         # Note: If two Hamiltonian diagonalizations have been used (e.g. adaptive damping),
         # the per k-point values are summed.
-        diagiter = mpi_mean(sum(mean(diag.n_iter) for diag in info.diagonalization),
-                            info.basis.comm_kpts)
+        if info.basis isa PlaneWaveBasis               # TODO: remove once FEM supports MPI
+            diagiter = mpi_mean(sum(mean(diag.n_iter) for diag in info.diagonalization),
+                                info.basis.comm_kpts)
+        else
+            diagiter = sum(mean(diag.n_iter) for diag in info.diagonalization)
+        end
     end
 
     !mpi_master() && return info  # Rest is printing => only do on master
@@ -73,8 +77,13 @@ function (cb::ScfDefaultCallback)(info)
         println(label_magn[2], label_damp[2], label_diag[2], label_time[2])
     end
     E    = isnothing(info.energies) ? Inf : info.energies.total
-    magn = sum(spin_density(info.ρout)) * info.basis.dvol
-    abs_magn = sum(abs, spin_density(info.ρout)) * info.basis.dvol
+    if info.basis isa PlaneWaveBasis
+        magn = sum(spin_density(info.ρout)) * info.basis.dvol
+        abs_magn = sum(abs, spin_density(info.ρout)) * info.basis.dvol
+    elseif info.basis isa FiniteElementBasis
+        magn = integrate(spin_density_FEM(info.ρout), info.basis, :ρ)
+        abs_magn = integrate(abs.(spin_density_FEM(info.ρout)), info.basis, :ρ)
+    end
 
     tstr = " "^9
     if show_time

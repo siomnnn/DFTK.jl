@@ -10,7 +10,7 @@ struct ValenceDensityPseudo    <: AtomicDensity end
 struct ValenceDensityAuto      <: AtomicDensity end
 
 # Random density method
-function guess_density(basis::PlaneWaveBasis, ::RandomDensity;
+function guess_density(basis::AbstractBasis, ::RandomDensity;
                        n_electrons=basis.model.n_electrons)
     random_density(basis, n_electrons)
 end
@@ -27,6 +27,17 @@ function random_density(basis::PlaneWaveBasis{T}, n_electrons::Integer) where {T
         @assert all(abs.(ρspin) .≤ ρtot)
     end
     ρ_from_total_and_spin(ρtot, ρspin)
+end
+function random_density(basis::FiniteElementBasis{T}, n_electrons::Integer) where {T}
+    n_dofs = get_n_free_dofs(basis, :ρ)
+    ρtot  = rand(T, n_dofs)
+    ρtot  = ρtot .* n_electrons ./ integrate(ρtot, basis, :ρ)     # Integration to n_electrons
+    ρspin = nothing
+    if basis.model.n_spin_components > 1
+        ρspin = rand((-1, 1), n_dofs) .* rand(T, n_dofs) .* ρtot
+        @assert all(abs.(ρspin) .≤ ρtot)
+    end
+    ρ_from_total_and_spin_FEM(ρtot, ρspin)
 end
 
 # Atomic density methods

@@ -286,23 +286,30 @@ end
 get_refinement_matrix(basis::FiniteElementBasis) = basis.refinement_matrix
 
 LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ψ, get_overlap_matrix(basis, field), ψ)^0.5
+LinearAlgebra.norm(ψ::AbstractMatrix{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = sum(dot(ψn, get_overlap_matrix(basis, field), ψn) for ψn in eachcol(ψ))^0.5
+
+integrate(f::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where T = dot(ones(T, length(f)), get_overlap_matrix(basis, field), f)
 
 function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
     constraint_matrix = get_constraint_matrix(basis, FEMKpoint(1, Vec3{T}(0, 0, 0)), field)
     mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, field) * constraint_matrix
     if !isnothing(mat)
-        (x, stats) = minres_qlp(mat, f)
+        (x, stats) = minres_qlp(mat, complex.(f))
         stats.solved || error("Laplacian solve did not converge")
-        return x
+        return real.(x)
     end
 
     op = NegHalfLaplaceFEMOperator(basis)
-    (x, stats) = minres_qlp(op, f)
+    (x, stats) = minres_qlp(op, complex.(f))
     stats.solved || error("Laplacian solve did not converge")
-    return x
+    return real.(x)
 end
 
 # not assuming that kpoints are sorted by spin, since they are user-specified.
 function krange_spin(basis::FiniteElementBasis, spin::Integer)
     findall(kpt -> kpt.spin == spin, basis.kpoints)
+end
+
+function weighted_ksum(basis::FiniteElementBasis, array)
+    sum(basis.kweights .* array)
 end
