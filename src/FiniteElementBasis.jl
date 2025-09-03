@@ -14,6 +14,7 @@ A finite-element discretized `Model`.
 """
 struct FiniteElementBasis{T,
                       VT <: Real,
+                      NFFTtype <: NFFTGrid{T, VT},
                       Arch <: AbstractArchitecture,
                      } <: AbstractBasis{T}
 
@@ -33,6 +34,9 @@ struct FiniteElementBasis{T,
 
     refinement_matrix::AbstractMatrix{T}        # Matrix to refine a function from the coarser ψ interpolation to the finer ρ interpolation (ψ_fine = refinement_matrix * ψ_coarse).
     
+    nfft_size::Tuple{Int, Int, Int}
+    nfft_grid::NFFTtype
+
     kpoints::Vector{FEMKpoint{T}}
     kweights::Vector{T}
 
@@ -48,6 +52,7 @@ function FiniteElementBasis(model::Model{T, VT},
                             h::T,
                             degree::Int,
                             discretization::FEMDiscretization{T},
+                            nfft_size::Tuple{Int, Int, Int},
                             kpoints::Vector{FEMKpoint{T}},
                             kweights::Vector{T},
                             precompute_laplacian::Bool,
@@ -67,10 +72,20 @@ function FiniteElementBasis(model::Model{T, VT},
     end
     refinement_matrix = init_refinement_matrix(discretization)
 
-    basis = FiniteElementBasis{T, VT, Arch}(model, austrip(h), degree, discretization,
+    # NFFT only likes nodes in [-0.5, 0.5)
+    reduced_dof_coords = ([model.lattice] .\ get_dof_positions(discretization, :ρ)) .- [Vec3{VT}(0.5, 0.5, 0.5)]
+    for i in eachindex(reduced_dof_coords)
+        mask = reduced_dof_coords[i] .>= 0.5
+        neg_mask = reduced_dof_coords[i] .< -0.5
+        reduced_dof_coords[i] += (neg_mask - mask) .* Vec3{VT}(1.0, 1.0, 1.0)
+    end
+    nfft_grid = NFFTGrid(nfft_size, reduced_dof_coords, model.unit_cell_volume, architecture)
+
+    basis = FiniteElementBasis{T, VT, typeof(nfft_grid), Arch}(model, austrip(h), degree, discretization,
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
-                                           refinement_matrix, kpoints, kweights,
+                                           refinement_matrix, nfft_size, nfft_grid,
+                                           kpoints, kweights,
                                            architecture, terms)
 
     for (it, t) in enumerate(model.term_types)
@@ -99,6 +114,7 @@ disabled by setting `precompute_laplacian=false`.
                                     h::Number,
                                     degree::Int=1,
                                     grid=nothing,
+                                    nfft_size=nothing,
                                     kpoints::Vector{FEMKpoint{T}}=[FEMKpoint(1, Vec3{T}(0, 0, 0))],
                                     kweights::Vector{T}=[one(T)],
                                     precompute_laplacian=true,
@@ -111,9 +127,13 @@ disabled by setting `precompute_laplacian=false`.
     if isnothing(grid)
         grid = construct_FEM_grid(model, austrip(h); write_to_file=write_to_file, filename=filename)
     end
+    if isnothing(nfft_size)
+        nfft_size = tuple(2 .^ ceil.(Int, log2.(norm.(eachcol(model.lattice)) ./ austrip(h)))...)
+    end
+
     discretization = FEMDiscretization(model.lattice, grid; degree)
 
-    FiniteElementBasis(model, austrip(h), degree, discretization, kpoints, kweights, precompute_laplacian, architecture)
+    FiniteElementBasis(model, austrip(h), degree, discretization, nfft_size, kpoints, kweights, precompute_laplacian, architecture)
 end
 
 # prevent broadcast
@@ -134,6 +154,9 @@ function construct_FEM_grid(model::Model{T}, h::T; write_to_file=false, filename
 
     # Suppress terminal output
     gmsh.option.setNumber("General.Terminal",0)
+
+    # multithreading
+    gmsh.option.setNumber("General.NumThreads",DFTK_threads.x)
 
     gmsh.model.add("unit_cell")
 
@@ -314,3 +337,21 @@ end
 function weighted_ksum(basis::FiniteElementBasis, array)
     sum(basis.kweights .* array)
 end
+
+G_vectors(basis::FiniteElementBasis) = G_vectors(basis.nfft_size)
+
+"""
+Forward NFFT calls to the FiniteElementBasis nfft_grid field
+"""
+nfft(basis::FiniteElementBasis, f_real::AbstractArray3) = 
+    nfft(basis.nfft_grid, f_real)
+nfft!(f_fourier::AbstractArray3, basis::FiniteElementBasis, f_real::AbstractArray3) = 
+    nfft!(f_fourier, basis.nfft_grid, f_real)
+anfft(basis::FiniteElementBasis, f_real::AbstractArray3) = 
+    anfft(basis.nfft_grid, f_real)
+anfft!(f_real::AbstractArray3, basis::FiniteElementBasis, f_fourier::AbstractArray3) = 
+    nfft!(f_real, basis.nfft_grid, f_fourier)
+rnfft(basis::FiniteElementBasis, f_real::AbstractArray3) = 
+    rnfft(basis.nfft_grid, f_real)
+ranfft(basis::FiniteElementBasis, f_fourier::AbstractArray3) = 
+    ranfft(basis.nfft_grid, f_fourier)
