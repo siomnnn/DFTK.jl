@@ -183,7 +183,8 @@ function compute_local_potential(basis::FiniteElementBasis{T}; positions=basis.m
     end
 
     pot_fourier = reshape(pot, basis.nfft_size)
-    return rnfft(basis, pot_fourier)
+    enforce_real!(pot, basis)  # Symmetrize coeffs to have real iNFFT
+    return rnfft2(basis, pot_fourier)
 end
 (::AtomicLocal)(basis::FiniteElementBasis{T}) where {T} =
     TermAtomicLocal(compute_local_potential(basis))

@@ -311,7 +311,7 @@ end
 
 # Low-pass filters ρ (in Fourier) so that symmetry operations acting on it stay in the grid
 # This function is optimized for CPU and GPU.
-function lowpass_for_symmetry!(ρ::AbstractArray, basis; symmetries=basis.symmetries)
+function lowpass_for_symmetry!(ρ::AbstractArray, basis::PlaneWaveBasis; symmetries=basis.symmetries)
     all(isone, symmetries) && return ρ
 
     Gs = reshape(G_vectors(basis), size(ρ))
@@ -325,6 +325,25 @@ function lowpass_for_symmetry!(ρ::AbstractArray, basis; symmetries=basis.symmet
         for S in symm_S
             idx = index_G_vectors(fft_size, S * G)
             acc *= isnothing(idx) ? 0 : 1
+        end
+        acc
+    end
+    ρ
+end
+function lowpass_for_symmetry!(ρ::AbstractArray, basis::FiniteElementBasis; symmetries=basis.symmetries)
+    all(isone, symmetries) && return ρ
+
+    Gs = reshape(G_vectors(basis), size(ρ))
+    nfft_size = basis.nfft_size
+
+    symm_S = to_device(basis.architecture, [symop.S for symop in symmetries])
+
+    # Loop structure optimized for both CPU and GPU
+    lower_bound = .- (nfft_size .- 1) ./ 2
+    map!(ρ, ρ, Gs) do ρ_i, G
+        acc = ρ_i
+        for S in symm_S
+            acc *= any(G .== lower_bound) ? 0 : 1
         end
         acc
     end
@@ -500,6 +519,6 @@ end
 Ensure its real-space equivalent of passed Fourier-space representation is entirely real by
 removing wavevectors `G` that don't have a `-G` counterpart in the basis.
 """
-@timing function enforce_real!(fourier_coeffs, basis::PlaneWaveBasis)
+@timing function enforce_real!(fourier_coeffs, basis::AbstractBasis)
     lowpass_for_symmetry!(fourier_coeffs, basis; symmetries=[SymOp(-Mat3(I), Vec3(0, 0, 0))])
 end

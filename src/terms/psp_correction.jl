@@ -7,7 +7,7 @@ struct PspCorrection end
 struct TermPspCorrection{T} <: Term
     energy::T  # precomputed energy
 end
-function TermPspCorrection(basis::PlaneWaveBasis)
+function TermPspCorrection(basis::AbstractBasis)
     model = basis.model
     if model.n_dim != 3 && any(attype isa ElementPsp for attype in model.atoms)
         error("The use of pseudopotentials is only sensible for 3D systems.")
@@ -17,6 +17,9 @@ end
 
 function ene_ops(term::TermPspCorrection, basis::PlaneWaveBasis, ψ, occupation; kwargs...)
     (; E=term.energy, ops=[NoopOperator(basis, kpt) for kpt in basis.kpoints])
+end
+function ene_ops(term::TermPspCorrection, basis::FiniteElementBasis, ψ, occupation; kwargs...)
+    (; E=term.energy, ops=[NoopFEMOperator(basis, kpt) for kpt in basis.kpoints])
 end
 
 """

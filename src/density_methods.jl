@@ -110,7 +110,7 @@ end
 
 # Build a total charge density without spin information from a superposition of atomic
 # densities.
-function atomic_total_density(basis::PlaneWaveBasis{T}, method::AtomicDensity;
+function atomic_total_density(basis::AbstractBasis{T}, method::AtomicDensity;
                               coefficients=ones(T, length(basis.model.atoms))) where {T}
     atomic_density_superposition(basis, method; coefficients)
 end
@@ -175,11 +175,36 @@ function atomic_density_superposition(basis::PlaneWaveBasis{T},
     irfft(basis, reshape(ρ, basis.fft_size))
 end
 
+function atomic_density_superposition(basis::FiniteElementBasis{T},
+                                      method::AtomicDensity;
+                                      coefficients=ones(T, length(basis.model.atoms))
+                                      ) where {T}
+    form_factors, iG2ifnorm = atomic_density_form_factors(basis, method)
+
+    # Pre-allocation of large arrays for GPU efficiency
+    Gs = G_vectors(basis)
+    ρ = to_device(basis.architecture, zeros(Complex{T}, length(Gs)))
+    ρ_tmp = similar(ρ)
+    indices = to_device(basis.architecture, collect(1:length(Gs)))
+
+    for (igroup, group) in enumerate(basis.model.atom_groups)
+        for iatom in group
+            r = basis.model.positions[iatom]
+            ff_group = @view form_factors[:, igroup]
+            map!(iG -> cis2pi(-dot(Gs[iG], r)) * ff_group[iG2ifnorm[iG]], ρ_tmp, indices)
+            ρ .+= ρ_tmp .* (coefficients[iatom] / sqrt(basis.model.unit_cell_volume))
+        end
+    end
+
+    enforce_real!(ρ, basis)  # Symmetrize Fourier coeffs to have real iFFT
+    rnfft2(basis, reshape(ρ, basis.nfft_size))  # real just to make sure that no numerical inaccuracies create imaginary parts
+end
+
 """
 Returns the form factors at unique values of |G + q| (in Cartesian coordinates).
 Additionally, returns a mapping from any G index to the corresponding entry in the form_factors array.
 """
-function atomic_density_form_factors(basis::PlaneWaveBasis{T},
+function atomic_density_form_factors(basis::AbstractBasis{T},
                                      method::AtomicDensity ) where {T<:Real}
     G_cart = to_cpu(G_vectors_cart(basis))
 

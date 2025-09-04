@@ -43,6 +43,10 @@ struct FiniteElementBasis{T,
     ## Information on the hardware and device used for computations.
     architecture::Arch
 
+    ## Symmetry operations that leave the discretized model (k and r grids) invariant.
+    # Subset of model.symmetries. Mostly a dummy field, as symmetries of FEM grids are very limited.
+    symmetries::Vector{SymOp{VT}}
+
     ## Instantiated terms (<: Term). See Hamiltonian for high-level usage
     terms::Vector{Any}
 end
@@ -73,7 +77,7 @@ function FiniteElementBasis(model::Model{T, VT},
     refinement_matrix = init_refinement_matrix(discretization)
 
     # NFFT only likes nodes in [-0.5, 0.5)
-    reduced_dof_coords = ([model.lattice] .\ get_dof_positions(discretization, :ρ)) .- [Vec3{VT}(0.5, 0.5, 0.5)]
+    reduced_dof_coords = ([model.inv_lattice] .* get_dof_positions(discretization, :ρ)) .- [Vec3{VT}(0.5, 0.5, 0.5)]
     for i in eachindex(reduced_dof_coords)
         mask = reduced_dof_coords[i] .>= 0.5
         neg_mask = reduced_dof_coords[i] .< -0.5
@@ -81,12 +85,14 @@ function FiniteElementBasis(model::Model{T, VT},
     end
     nfft_grid = NFFTGrid(nfft_size, reduced_dof_coords, model.unit_cell_volume, architecture)
 
+    symmetries = [symop for symop in model.symmetries if isone(symop)]  # only identities
+
     basis = FiniteElementBasis{T, VT, typeof(nfft_grid), Arch}(model, austrip(h), degree, discretization,
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
                                            refinement_matrix, nfft_size, nfft_grid,
-                                           kpoints, kweights,
-                                           architecture, terms)
+                                           kpoints, kweights, architecture,
+                                           symmetries, terms)
 
     for (it, t) in enumerate(model.term_types)
         term_name = string(nameof(typeof(t)))
@@ -338,20 +344,18 @@ function weighted_ksum(basis::FiniteElementBasis, array)
     sum(basis.kweights .* array)
 end
 
-G_vectors(basis::FiniteElementBasis) = G_vectors(basis.nfft_size)
+G_vectors(basis::FiniteElementBasis) = G_vectors(basis.nfft_grid)
+
+function G_vectors_cart(basis::FiniteElementBasis)
+    map(recip_vector_red_to_cart(basis.model), G_vectors(basis))
+end
 
 """
 Forward NFFT calls to the FiniteElementBasis nfft_grid field
 """
-nfft(basis::FiniteElementBasis, f_real::AbstractArray3) = 
-    nfft(basis.nfft_grid, f_real)
-nfft!(f_fourier::AbstractArray3, basis::FiniteElementBasis, f_real::AbstractArray3) = 
-    nfft!(f_fourier, basis.nfft_grid, f_real)
-anfft(basis::FiniteElementBasis, f_real::AbstractArray3) = 
-    anfft(basis.nfft_grid, f_real)
-anfft!(f_real::AbstractArray3, basis::FiniteElementBasis, f_fourier::AbstractArray3) = 
-    nfft!(f_real, basis.nfft_grid, f_fourier)
-rnfft(basis::FiniteElementBasis, f_real::AbstractArray3) = 
-    rnfft(basis.nfft_grid, f_real)
-ranfft(basis::FiniteElementBasis, f_fourier::AbstractArray3) = 
-    ranfft(basis.nfft_grid, f_fourier)
+nfft1(basis::FiniteElementBasis{T}, f_real::AbstractArray) where {T} = nfft1(basis.nfft_grid, f_real)
+nfft1!(f_fourier::AbstractArray, basis::FiniteElementBasis{T}, f_real::AbstractArray) where {T} = nfft1!(f_fourier, basis.nfft_grid, f_real)
+nfft2(basis::FiniteElementBasis{T}, f_fourier::AbstractArray) where {T} = nfft2(basis.nfft_grid, f_fourier)
+nfft2!(f_real::AbstractArray, basis::FiniteElementBasis{T}, f_fourier::AbstractArray) where {T} = nfft2!(f_real, basis.nfft_grid, f_fourier)
+rnfft1(basis::FiniteElementBasis{T}, f_real::AbstractArray) where {T} = rnfft1(basis.nfft_grid, f_real)
+rnfft2(basis::FiniteElementBasis{T}, f_fourier::AbstractArray) where {T} = rnfft2(basis.nfft_grid, f_fourier)

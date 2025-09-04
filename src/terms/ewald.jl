@@ -17,7 +17,7 @@ struct TermEwald{T} <: Term
     η::T                     # Parameter used for the splitting
     #                          1/r ≡ erf(η·r)/r + erfc(η·r)/r
 end
-@timing "precomp: Ewald" function TermEwald(basis::PlaneWaveBasis{T};
+@timing "precomp: Ewald" function TermEwald(basis::AbstractBasis{T};
                                             η=default_η(basis.model.lattice)) where {T}
     model = basis.model
     charges = charge_ionic.(model.atoms)
@@ -27,6 +27,9 @@ end
 
 function ene_ops(term::TermEwald, basis::PlaneWaveBasis, ψ, occupation; kwargs...)
     (; E=term.energy, ops=[NoopOperator(basis, kpt) for kpt in basis.kpoints])
+end
+function ene_ops(term::TermEwald, basis::FiniteElementBasis, ψ, occupation; kwargs...)
+    (; E=term.energy, ops=[NoopFEMOperator(basis, kpt) for kpt in basis.kpoints])
 end
 compute_forces(term::TermEwald, ::PlaneWaveBasis, ψ, occupation; kwargs...) = term.forces
 

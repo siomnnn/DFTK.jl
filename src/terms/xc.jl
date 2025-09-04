@@ -29,7 +29,7 @@ function Base.show(io::IO, xc::Xc)
     print(io, "Xc($fun$fac)")
 end
 
-function (xc::Xc)(basis::PlaneWaveBasis{T}) where {T}
+function (xc::Xc)(basis::AbstractBasis{T}) where {T}
     isempty(xc.functionals) && return TermNoop()
 
     # Charge density for non-linear core correction
@@ -37,27 +37,6 @@ function (xc::Xc)(basis::PlaneWaveBasis{T}) where {T}
     if xc.use_nlcc && any(has_core_density, basis.model.atoms)
         ρcore = ρ_from_total(basis, atomic_total_density(basis, CoreDensity()))
         minimum(ρcore) < -sqrt(eps(T)) && @warn("Negative ρcore detected: $(minimum(ρcore))")
-    end
-    functionals = map(xc.functionals) do fun
-        # Strip duals from functional parameters if needed
-        params = parameters(fun)
-        if !isempty(params)
-            newparams = convert_dual.(T, params)
-            fun = change_parameters(fun, newparams; keep_identifier=true)
-        end
-        fun
-    end
-    TermXc(convert(Vector{Functional}, functionals),
-           convert_dual(T, xc.scaling_factor),
-           T(xc.potential_threshold), ρcore)
-end
-
-function (xc::Xc)(basis::FiniteElementBasis{T}) where {T}
-    isempty(xc.functionals) && return TermNoop()
-
-    ρcore = nothing
-    if xc.use_nlcc && any(has_core_density, basis.model.atoms)
-        error("Non-linear core correction is not yet implemented for FEM bases.")
     end
     functionals = map(xc.functionals) do fun
         # Strip duals from functional parameters if needed
