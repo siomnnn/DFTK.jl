@@ -28,7 +28,7 @@ end
     ops = [FEMRealSpaceMultiplication(basis, kpt, potview(term.potential_values, kpt.spin))
            for kpt in basis.kpoints]
     if :ρ in keys(kwargs)
-        E = dot(total_density_FEM(kwargs[:ρ]), get_overlap_matrix(basis, :ρ), term.potential_values)
+        E = real(dot(total_density_FEM(kwargs[:ρ]), get_overlap_matrix(basis, :ρ), term.potential_values))
     else
         E = T(Inf)
     end
@@ -70,7 +70,7 @@ function (external::ExternalFromReal)(basis::PlaneWaveBasis{T}) where {T}
     TermExternal(convert_dual.(T, pot_real))
 end
 function (external::ExternalFromReal)(basis::FiniteElementBasis{T}) where {T}
-    pot_real = external.potential.(get_dof_positions(basis, :ρ))
+    pot_real = external.potential.(get_free_dof_positions(basis, :ρ))
     TermExternal(convert_dual.(T, pot_real))
 end
 

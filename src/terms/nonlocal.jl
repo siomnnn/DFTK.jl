@@ -28,6 +28,28 @@ struct TermAtomicNonlocal <: Term
     ops::Vector{NonlocalOperator}
 end
 
+function (::AtomicNonlocal)(basis::FiniteElementBasis{T}) where {T}
+    model = basis.model
+
+    # keep only pseudopotential atoms and positions
+    psp_groups = [group for group in model.atom_groups
+                  if model.atoms[first(group)] isa ElementPsp]
+    psps          = [model.atoms[first(group)].psp      for group in psp_groups]
+    psp_positions = [model.positions[group] for group in psp_groups]
+
+    isempty(psp_groups) && return TermNoop()
+    ops = map(basis.kpoints) do kpt
+        P = build_projection_vectors(basis, kpt, psps, psp_positions)
+        D = build_projection_coefficients(T, psps, psp_positions)
+        NonlocalFEMOperator(basis, kpt, P, to_device(basis.architecture, D))
+    end
+    TermAtomicNonlocalFEM(ops)
+end
+
+struct TermAtomicNonlocalFEM <: Term
+    ops::Vector{NonlocalFEMOperator}
+end
+
 @timing "ene_ops: nonlocal" function ene_ops(term::TermAtomicNonlocal,
                                              basis::PlaneWaveBasis{T},
                                              ψ, occupation; kwargs...) where {T}
@@ -42,6 +64,24 @@ end
         E += basis.kweights[ik] * sum(band_enes .* occupation[ik])
     end
     E = mpi_sum(E, basis.comm_kpts)
+
+    (; E, term.ops)
+end
+
+# TODO: duplicate code. Any way to merge these even though the argument types are different?
+@timing "ene_ops: nonlocal" function ene_ops(term::TermAtomicNonlocalFEM,
+                                             basis::FiniteElementBasis{T},
+                                             ψ, occupation; kwargs...) where {T}
+    if isnothing(ψ) || isnothing(occupation)
+        return (; E=T(Inf), term.ops)
+    end
+
+    E = zero(T)
+    for (ik, ψk) in enumerate(ψ)
+        Pψk = term.ops[ik].P' * ψk  # nproj x nband
+        band_enes = dropdims(sum(real.(conj.(Pψk) .* (term.ops[ik].D * Pψk)), dims=1), dims=1)
+        E += basis.kweights[ik] * sum(band_enes .* occupation[ik])
+    end
 
     (; E, term.ops)
 end
@@ -263,6 +303,64 @@ function build_form_factors(fun::Function, l::Int,
     end
 
     form_factors
+end
+
+function build_projection_vectors(basis::FiniteElementBasis{T}, kpt::FEMKpoint,
+                                  psps::AbstractVector{<: NormConservingPsp},
+                                  psp_positions) where {T}
+    n_proj = count_n_proj(psps, psp_positions)
+    n_dofs = get_n_free_dofs(basis, :ψ)
+    proj_vectors = zeros(Complex{eltype(psp_positions[1][1])}, n_dofs, n_proj)
+    dof_coords = get_free_dof_positions(basis, :ψ)
+
+    offset = 0  # offset into proj_vectors
+    for (psp, positions) in zip(psps, psp_positions)
+        for r in positions
+            real_space_coords = basis.model.lattice * (r + Vec3(0.5, 0.5, 0.5))
+
+            # only use the closest image to each dof            
+            wrap_to_unit_cell(x) = basis.model.lattice * (mod.(basis.model.inv_lattice * x + Vec3(0.5, 0.5, 0.5), 1) - Vec3(0.5, 0.5, 0.5))
+            distances = map(wrap_to_unit_cell, dof_coords .- [real_space_coords])
+
+            proj_evals = zeros(Complex{T}, n_dofs, n_proj)
+            for l = 0:psp.lmax, 
+                n_proj_l = count_n_proj_radial(psp, l)
+                local_offset = sum(x -> count_n_proj(psp, x), 0:l-1; init=0) .+ 
+                                   n_proj_l .* (collect(1:2l+1) .- 1) # offset about m for a given l 
+                for i = 1:n_proj_l
+                    proj_li(x) = eval_psp_projector_real(psp, i, l, x)
+                    proj_evals_li = build_projection_evals(proj_li, l, distances)
+                    proj_evals[:, local_offset.+i] = proj_evals_li
+                end
+            end
+            
+            @views for iproj = 1:count_n_proj(psp)
+                proj_i = get_overlap_matrix(basis, :ψ) * proj_evals[:, iproj]
+                proj_vectors[:, offset+iproj] .= proj_i
+            end
+            offset += count_n_proj(psp)
+        end
+    end
+    @assert offset == n_proj
+
+    # Offload potential values to a device (like a GPU)
+    to_device(basis.architecture, proj_vectors)
+end
+
+function build_projection_evals(fun::Function, l::Int, distances::AbstractVector{Vec3{TT}}) where {TT}
+    T = real(TT)
+
+    radials = fun.(norm.(distances))
+
+    proj_evals = Matrix{Complex{T}}(undef, length(distances), 2l + 1)
+    for (id, d) in enumerate(distances)
+        for m = -l:l
+            angular = ylm_real(l, m, d)
+            proj_evals[id, m+l+1] = radials[id] * angular
+        end
+    end
+
+    proj_evals
 end
 
 # Helpers for phonon computations.

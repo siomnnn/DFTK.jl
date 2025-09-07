@@ -88,7 +88,7 @@ that does not have valence charge density data.
 When magnetic moments are provided, construct a symmetry-broken density guess.
 The magnetic moments should be specified in units of ``μ_B``.
 """
-function guess_density(basis::PlaneWaveBasis, method::AtomicDensity, magnetic_moments=[];
+function guess_density(basis::AbstractBasis, method::AtomicDensity, magnetic_moments=[];
                        n_electrons=basis.model.n_electrons)
     atomic_density(basis, method, magnetic_moments, n_electrons)
 end
@@ -107,6 +107,18 @@ function atomic_density(basis::PlaneWaveBasis, method::AtomicDensity, magnetic_m
     end
     ρ
 end
+function atomic_density(basis::FiniteElementBasis, method::AtomicDensity, magnetic_moments,
+                        n_electrons)
+    ρtot = atomic_total_density(basis, method)
+    ρspin = atomic_spin_density(basis, method, magnetic_moments)
+    ρ = ρ_from_total_and_spin_FEM(ρtot, ρspin)
+
+    N = integrate(ρ, basis, :ρ)
+    if !isnothing(n_electrons) && (N > 0)
+        ρ .*= n_electrons / N  # Renormalize to the correct number of electrons
+    end
+    ρ
+end
 
 # Build a total charge density without spin information from a superposition of atomic
 # densities.
@@ -117,7 +129,7 @@ end
 
 # Build a spin density from a superposition of atomic densities and provided magnetic
 # moments (with units ``μ_B``).
-function atomic_spin_density(basis::PlaneWaveBasis{T}, method::AtomicDensity,
+function atomic_spin_density(basis::AbstractBasis{T}, method::AtomicDensity,
                              magnetic_moments) where {T}
     model = basis.model
     if model.spin_polarization in (:none, :spinless)

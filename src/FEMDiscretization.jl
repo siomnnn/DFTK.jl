@@ -315,7 +315,7 @@ function init_refinement_matrix(disc::FEMDiscretization{T}) where T
                                                                                                                 # but by default sparse sums them up, which we have to prevent.
 end
 
-function get_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T
+function get_free_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where T
     dh = get_dof_handler(disc, field)
     ip = Ferrite.getfieldinterpolation(dh, Ferrite.find_field(dh, field))
     ref_coords = hcat(Ferrite.reference_coordinates(ip)...)

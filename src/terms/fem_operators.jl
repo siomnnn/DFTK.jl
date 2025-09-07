@@ -95,23 +95,23 @@ function Matrix(op::FEMRealSpaceMultiplication)
     hcat(out_cols...)
 end
 
-#"""
-#Nonlocal operator in Fourier space in Kleinman-Bylander format,
-#defined by its projectors P matrix and coupling terms D:
-#Hψ = PDP' ψ.
-#"""
-#struct NonlocalOperator{T <: Real, PT, DT} <: RealFourierOperator
-#    basis::PlaneWaveBasis{T}
-#    kpoint::Kpoint{T}
-#    # not typed, can be anything that supports PDP'ψ
-#    P::PT
-#    D::DT
-#end
-#function apply!(Hψ, op::NonlocalOperator, ψ)
-#    mul!(Hψ.fourier, op.P, (op.D * (op.P' * ψ.fourier)), 1, 1)
-#end
-#Matrix(op::NonlocalOperator) = op.P * op.D * op.P'
-#
+"""
+Nonlocal operator in Fourier space in Kleinman-Bylander format,
+defined by its projectors P matrix and coupling terms D:
+Hψ = PDP' ψ.
+"""
+struct NonlocalFEMOperator{T <: Real, PT, DT} <: FEMOperator
+    basis::FiniteElementBasis{T}
+    kpoint::FEMKpoint{T}
+    # not typed, can be anything that supports PDP'ψ
+    P::PT
+    D::DT
+end
+function apply!(Hψ, op::NonlocalFEMOperator, ψ)
+    mul!(Hψ, op.P, (op.D * (op.P' * ψ)), 1, 1)
+end
+Matrix(op::NonlocalFEMOperator) = op.P * op.D * op.P'
+
 @doc raw"""
 Laplacian operator with the usual prefactor of -1/2, i.e.
 ```math
