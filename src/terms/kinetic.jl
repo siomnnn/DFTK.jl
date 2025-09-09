@@ -80,10 +80,10 @@ end
 
     E = zero(T)
     for (ik, ψk) in enumerate(ψ)
-        constraint_matrix = get_constraint_matrix(basis, basis.kpoints[ik], :ψ)
+        constraint_matrix = basis.overlap_ops[basis.kpoints[ik]].constraint_matrix
         for (iband, ψnk) in enumerate(eachcol(ψk))
             ψnk_per = constraint_matrix * ψnk
-            E += real(basis.kweights[ik] * occupation[ik][iband] * dot(ψnk_per, get_neg_half_laplace_matrix(basis, :ψ), ψnk_per))
+            E += basis.kweights[ik] * occupation[ik][iband] * real(dot(ψnk_per, get_neg_half_laplace_matrix(basis, :ψ), ψnk_per))
         end
     end
 

@@ -91,15 +91,15 @@ function get_dofs_on_facetset(dh::DofHandler, facetset::String)
         end
     end
 
-    unique!(dofs)
     sort!(dofs)
+    unique!(dofs)
     return dofs
 end
 
 function setup_periodic_dofsets(dh::DofHandler)
     per_dofsets = Vector{Vector{Int}}(undef, 3)
     for i in 1:3
-        per_dofsets[i] = get_dofs_on_facetset(dh, "periodic_$(i)b")
+        per_dofsets[i] = get_dofs_on_facetset(dh, "periodic_$(i)a")
     end
     return per_dofsets
 end
@@ -248,10 +248,11 @@ function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
         assemble!(assembler, celldofs(cell), Ke)
     end
 
-    Ferrite.apply!(H, ch)
-
-    free_dofs = get_free_dofs(disc, field)
-    H[free_dofs, free_dofs]
+    if field == :ρ
+        Ferrite.apply!(H, ch)
+        return H[ch.free_dofs, ch.free_dofs]
+    end
+    H
 end
 
 function init_neg_half_laplace_matrix(disc::FEMDiscretization{T}, field) where T

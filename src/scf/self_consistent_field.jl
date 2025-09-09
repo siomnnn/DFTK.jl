@@ -283,7 +283,7 @@ end
 # TODO: unify with PlaneWaveBasis version above once those are implemented for FEM
 @timing function self_consistent_field(
     basis::FiniteElementBasis{T};
-    ρ=guess_density(basis, RandomDensity()),    # TODO: better guess method
+    ρ=guess_density(basis),
     τ=nothing,
     ψ=nothing,
     tol=1e-6,
@@ -338,7 +338,7 @@ end
             (; energies) = energy(basis, ψ, occupation; ρ=ρout, τ, eigenvalues, εF)
         end
         history_Etot = vcat(info.history_Etot, energies.total)
-        history_Δρ = vcat(info.history_Δρ, norm(Δρ, basis, :ρ))
+        history_Δρ = vcat(info.history_Δρ, weighted_norm(Δρ, get_overlap_matrix(basis, :ρ)))
         n_matvec = info.n_matvec + nextstate.n_matvec
         info_next = merge(info_next, (; energies, history_Etot, history_Δρ, n_matvec))
 

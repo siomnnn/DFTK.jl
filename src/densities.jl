@@ -74,7 +74,7 @@ end
         (ik, n) = kn
         kpt = basis.kpoints[ik]
         mul!(storage.ψnk_fine, get_refinement_matrix(basis),  ψ[ik][:, n])
-        storage.ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_fine))
+        storage.ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_fine) ./ integrate(abs2.(storage.ψnk_fine), get_overlap_matrix(basis, :ρ)))
 
         synchronize_device(basis.architecture)
     end

@@ -164,7 +164,7 @@ function xc_potential_real(term::TermXc, basis::FiniteElementBasis{T}, ψ, occup
     # If the XC functional is not supported for an architecture, terms is on the CPU
     terms = potential_terms(term.functionals, density)
     @assert haskey(terms, :Vρ) && haskey(terms, :e)
-    E = term.scaling_factor * sum([integrate(es, basis, :ρ) for es in eachrow(terms.e)])
+    E = term.scaling_factor * sum([integrate(es, get_overlap_matrix(basis, :ρ)) for es in eachrow(terms.e)])
 
     potential = zero(ρ)
     @views for s = 1:n_spin

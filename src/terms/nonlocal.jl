@@ -313,10 +313,12 @@ function build_projection_vectors(basis::FiniteElementBasis{T}, kpt::FEMKpoint,
     proj_vectors = zeros(Complex{eltype(psp_positions[1][1])}, n_dofs, n_proj)
     dof_coords = get_free_dof_positions(basis, :ψ)
 
+    right_constraint = get_constraint_matrix(basis, :ψ)
+
     offset = 0  # offset into proj_vectors
     for (psp, positions) in zip(psps, psp_positions)
         for r in positions
-            real_space_coords = basis.model.lattice * (r + Vec3(0.5, 0.5, 0.5))
+            real_space_coords = basis.model.lattice * r
 
             # only use the closest image to each dof            
             wrap_to_unit_cell(x) = basis.model.lattice * (mod.(basis.model.inv_lattice * x + Vec3(0.5, 0.5, 0.5), 1) - Vec3(0.5, 0.5, 0.5))
@@ -335,7 +337,7 @@ function build_projection_vectors(basis::FiniteElementBasis{T}, kpt::FEMKpoint,
             end
             
             @views for iproj = 1:count_n_proj(psp)
-                proj_i = get_overlap_matrix(basis, :ψ) * proj_evals[:, iproj]
+                proj_i = basis.overlap_ops[kpt].constraint_matrix' * (get_overlap_matrix(basis, :ψ) * (right_constraint * proj_evals[:, iproj]))
                 proj_vectors[:, offset+iproj] .= proj_i
             end
             offset += count_n_proj(psp)

@@ -81,8 +81,8 @@ function (cb::ScfDefaultCallback)(info)
         magn = sum(spin_density(info.ρout)) * info.basis.dvol
         abs_magn = sum(abs, spin_density(info.ρout)) * info.basis.dvol
     elseif info.basis isa FiniteElementBasis
-        magn = integrate(spin_density_FEM(info.ρout), info.basis, :ρ)
-        abs_magn = integrate(abs.(spin_density_FEM(info.ρout)), info.basis, :ρ)
+        magn = integrate(spin_density_FEM(info.ρout), get_overlap_matrix(info.basis, :ρ))
+        abs_magn = integrate(abs.(spin_density_FEM(info.ρout)), get_overlap_matrix(info.basis, :ρ))
     end
 
     tstr = " "^9

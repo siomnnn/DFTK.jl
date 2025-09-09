@@ -31,7 +31,7 @@ end
 function random_density(basis::FiniteElementBasis{T}, n_electrons::Integer) where {T}
     n_dofs = get_n_free_dofs(basis, :ρ)
     ρtot  = rand(T, n_dofs)
-    ρtot  = ρtot .* n_electrons ./ integrate(ρtot, basis, :ρ)     # Integration to n_electrons
+    ρtot  = ρtot .* n_electrons ./ integrate(ρtot, get_overlap_matrix(basis, :ρ))     # Integration to n_electrons
     ρspin = nothing
     if basis.model.n_spin_components > 1
         ρspin = rand((-1, 1), n_dofs) .* rand(T, n_dofs) .* ρtot
@@ -41,12 +41,12 @@ function random_density(basis::FiniteElementBasis{T}, n_electrons::Integer) wher
 end
 
 # Atomic density methods
-function guess_density(basis::PlaneWaveBasis, magnetic_moments=[],
+function guess_density(basis::AbstractBasis, magnetic_moments=[],
                        n_electrons=basis.model.n_electrons)
     atomic_density(basis, ValenceDensityAuto(), magnetic_moments, n_electrons)
 end
 
-function guess_density(basis::PlaneWaveBasis, system::AbstractSystem,
+function guess_density(basis::AbstractBasis, system::AbstractSystem,
                        n_electrons=basis.model.n_electrons)
     # Using no pseudopotentials is ok, only magnetic moments are read from the system here.
     pseudopotentials = fill(nothing, length(system))
@@ -113,7 +113,8 @@ function atomic_density(basis::FiniteElementBasis, method::AtomicDensity, magnet
     ρspin = atomic_spin_density(basis, method, magnetic_moments)
     ρ = ρ_from_total_and_spin_FEM(ρtot, ρspin)
 
-    N = integrate(ρ, basis, :ρ)
+    N = sum(integrate(ρi, get_overlap_matrix(basis, :ρ)) for ρi in eachcol(ρ))
+
     if !isnothing(n_electrons) && (N > 0)
         ρ .*= n_electrons / N  # Renormalize to the correct number of electrons
     end
@@ -209,7 +210,7 @@ function atomic_density_superposition(basis::FiniteElementBasis{T},
     end
 
     enforce_real!(ρ, basis)  # Symmetrize Fourier coeffs to have real iFFT
-    rnfft2(basis, reshape(ρ, basis.nfft_size))  # real just to make sure that no numerical inaccuracies create imaginary parts
+    rnfft2(basis, reshape(ρ, basis.nfft_size))
 end
 
 """

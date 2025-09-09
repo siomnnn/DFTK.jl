@@ -69,7 +69,7 @@ end
                                             ψ, occupation; ρ, kwargs...) where {T}
     ρtot = total_density_FEM(ρ)
     ρ_zero_mean = 2pi * (ρtot .- basis.model.n_electrons / basis.model.unit_cell_volume)
-    pot = solve_laplace(basis, ρ_zero_mean, :ρ)*term.scaling_factor
+    pot = solve_laplace_density(basis, ρ_zero_mean)*term.scaling_factor
     E = real(dot(pot, get_overlap_matrix(basis, :ρ), ρtot) / 2)
 
     ops = [FEMRealSpaceMultiplication(basis, kpt, pot) for kpt in basis.kpoints]

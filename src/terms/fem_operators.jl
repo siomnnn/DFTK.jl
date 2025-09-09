@@ -70,27 +70,25 @@ end
 # of χ_k(r) (this results in R * ψ), multiply by ϕ_j(r) (this is R .* (R * ψ)) and then integrate against V_k (this is V' * M_ρ * (R .* (R * ψ))).
 # All of this is done in an efficient way (minimal number of matvec operations).
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    M_ρ = get_overlap_matrix(op.basis, :ρ)
+    M_ρV = get_overlap_matrix(op.basis, :ρ) * op.potential
+
     R = get_refinement_matrix(op.basis)
-    
-    VTM_ρ = op.potential' * M_ρ
     Rψ = R * ψ
 
     R_copy = Complex.(R)
     R_copy.nzval .= R_copy.nzval .* Rψ[R_copy.rowval]       # SparseArrays isn't smart enough to optimize terms with structural zeros, wayyy faster than R .* Rψ
 
-    Hψ .+= transpose(VTM_ρ * R_copy)
+    Hψ .+= transpose(M_ρV' * R_copy)
 end
 function Matrix(op::FEMRealSpaceMultiplication)
-    M_ρ = get_overlap_matrix(op.basis, :ρ)
+    M_ρV = get_overlap_matrix(op.basis, :ρ) * op.potential
     R = get_refinement_matrix(op.basis)
 
-    VTM_ρ = op.potential' * M_ρ
     out_cols = []
     for R_col in eachcol(R)
         R_copy = Complex.(R)
         R_copy.nzval .= R_copy.nzval .* R_col[R_copy.rowval]
-        push!(out_cols, (VTM_ρ * R_copy)')
+        push!(out_cols, transpose(M_ρV' * R_copy))
     end
     hcat(out_cols...)
 end
@@ -124,46 +122,34 @@ struct NegHalfLaplaceFEMOperator{T <: Real} <: FEMOperator
 end
 function apply!(Hψ, op::NegHalfLaplaceFEMOperator, ψ)
     laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)
-    constraint_matrix = get_constraint_matrix(op.basis, op.kpoint, :ψ)
-    if !isnothing(laplace_matrix)
-        Hψ .+= constraint_matrix' * laplace_matrix * constraint_matrix * ψ
-        return
+    if haskey(op.basis.overlap_ops, op.kpoint)
+        constraint_matrix = op.basis.overlap_ops[op.kpoint].constraint_matrix
+    else
+        constraint_matrix = get_constraint_matrix(op.basis, op.kpoint, :ψ)
     end
-
-    dof_handler = get_dof_handler(op.basis, :ψ)
-    cell_values = get_cell_values(op.basis, :ψ)
-    out = zeros(eltype(op.basis), ndofs(dof_handler))
-
-    n_basefuncs = getnbasefunctions(cell_values)
-    fe = zeros(n_basefuncs)
-
-    n_quad = getnquadpoints(cell_values)
-
-    for cell in CellIterator(dof_handler)
-        reinit!(cell_values, cell)
-        fill!(fe, 0)
-
-        periodic_cell_dofs = apply_inverse_constraint_map(op.basis, celldofs(cell), :ψ)
-
-        ∇ϕ_evals = shape_gradient.([cell_values], 1:n_quad, (1:n_basefuncs)')
-        ψ_interpol = ∇ϕ_evals * ψ[periodic_cell_dofs]
-        dΩ = getdetJdV.([cell_values], 1:n_quad)
-
-        for i in 1:n_basefuncs
-            fe[i] += 0.5 * (∇ϕ_evals[:, i] .⋅ ψ_interpol) ⋅ dΩ
-        end
-    
-        assemble!(out, celldofs(cell), fe)
-    end
-
-    apply_bc!(out, get_constraint_handler(op.basis, :ψ))
-
-    Hψ .+= out[get_free_dofs(op.basis, :ψ)]
-    return
+    Hψ .+= constraint_matrix' * laplace_matrix * constraint_matrix * ψ
 end
 function Matrix(op::NegHalfLaplaceFEMOperator)
-    if !isnothing(op.basis.neg_half_laplacian)
-        return op.basis.neg_half_laplacian
+    laplace_matrix = get_neg_half_laplace_matrix(op.basis, :ψ)
+    if haskey(op.basis.overlap_ops, op.kpoint)
+        constraint_matrix = op.basis.overlap_ops[op.kpoint].constraint_matrix
+    else
+        constraint_matrix = get_constraint_matrix(op.basis, op.kpoint, :ψ)
     end
-    init_neg_half_laplace_matrix(op.basis.discretization, :ψ)
+    constraint_matrix' * laplace_matrix * constraint_matrix
+end
+
+struct OverlapFEMOperator{T <: Real} <: FEMOperator
+    basis::FiniteElementBasis{T}
+    kpoint::FEMKpoint{T}
+
+    constraint_matrix::AbstractMatrix
+end
+function apply!(Hψ, op::OverlapFEMOperator, ψ)
+    overlap_matrix = get_overlap_matrix(op.basis, :ψ)
+    Hψ .+= (op.constraint_matrix' * (overlap_matrix * (op.constraint_matrix * ψ)))
+end
+function Matrix(op::OverlapFEMOperator)
+    overlap_matrix = get_overlap_matrix(op.basis, :ψ)
+    op.constraint_matrix' * (overlap_matrix * op.constraint_matrix)
 end

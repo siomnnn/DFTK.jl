@@ -40,6 +40,9 @@ struct FiniteElementBasis{T,
     kpoints::Vector{FEMKpoint{T}}
     kweights::Vector{T}
 
+    ## Overlap operators (<: OverlapFEMOperator)
+    overlap_ops::Dict{FEMKpoint{T}, Any}  # one per k-point
+
     ## Information on the hardware and device used for computations.
     architecture::Arch
 
@@ -63,6 +66,7 @@ function FiniteElementBasis(model::Model{T, VT},
                             architecture::Arch,
                            ) where {T, VT, Arch}
     @assert length(kpoints) == length(kweights) "kpoints and kweights must have the same length"
+    overlap_ops = Dict{FEMKpoint{T}, Any}()
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
     ψ_overlap_matrix = init_overlap_matrix(discretization, :ψ)
@@ -77,11 +81,10 @@ function FiniteElementBasis(model::Model{T, VT},
     refinement_matrix = init_refinement_matrix(discretization)
 
     # NFFT only likes nodes in [-0.5, 0.5)
-    reduced_dof_coords = ([model.inv_lattice] .* get_free_dof_positions(discretization, :ρ)) .- [Vec3{VT}(0.5, 0.5, 0.5)]
+    reduced_dof_coords = ([model.inv_lattice] .* get_free_dof_positions(discretization, :ρ))
     for i in eachindex(reduced_dof_coords)
         mask = reduced_dof_coords[i] .>= 0.5
-        neg_mask = reduced_dof_coords[i] .< -0.5
-        reduced_dof_coords[i] += (neg_mask - mask) .* Vec3{VT}(1.0, 1.0, 1.0)
+        reduced_dof_coords[i] -= mask .* Vec3{VT}(1.0, 1.0, 1.0)
     end
     nfft_grid = NFFTGrid(nfft_size, reduced_dof_coords, model.unit_cell_volume, architecture)
 
@@ -91,8 +94,12 @@ function FiniteElementBasis(model::Model{T, VT},
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
                                            refinement_matrix, nfft_size, nfft_grid,
-                                           kpoints, kweights, architecture,
-                                           symmetries, terms)
+                                           kpoints, kweights, overlap_ops,
+                                           architecture, symmetries, terms)
+
+    for kpoint in kpoints
+        basis.overlap_ops[kpoint] = OverlapFEMOperator(basis, kpoint, get_constraint_matrix(basis, kpoint, :ψ))
+    end
 
     for (it, t) in enumerate(model.term_types)
         term_name = string(nameof(typeof(t)))
@@ -269,7 +276,6 @@ function get_neg_half_laplace_matrix(basis::FiniteElementBasis, field::Symbol)
 end
 
 function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T}, field::Symbol) where {T}
-    lattice = basis.model.lattice
     k = kpoint.coordinate
 
     ch = get_constraint_handler(basis, field)
@@ -294,12 +300,12 @@ function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T
             push!(J, j)
 
             lattice_dir = [pdof in periodic_dofset[i] for i in 1:3]
-            phase = exp(im * dot(k, lattice * lattice_dir))
+            phase = cis2pi(dot(k, lattice_dir))
             push!(vals, phase)
         end
     end
 
-    return SparseArrays.sparse!(I, J, vals, get_n_dofs(basis, field), get_n_free_dofs(basis, field))
+    return sparse(I, J, vals, get_n_dofs(basis, field), get_n_free_dofs(basis, field), (x, y) -> x)
 end
 
 function get_constraint_matrix(basis::FiniteElementBasis{T}, field::Symbol) where {T}
@@ -318,21 +324,20 @@ end
 
 get_refinement_matrix(basis::FiniteElementBasis) = basis.refinement_matrix
 
-function LinearAlgebra.norm(ψ::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where {T}
-    real(dot(ψ, get_overlap_matrix(basis, field), ψ))^0.5
+weighted_norm(ψ::AbstractVector{T}, overlap_op) where {T} = 
+    real(dot(ψ, overlap_op * ψ))^0.5
+
+weighted_norm(ψ::AbstractMatrix{T}, overlap_op) where {T} = 
+    map(col -> weighted_norm(col, overlap_op), eachcol(ψ))
+
+function integrate(f::AbstractVector{T}, overlap_op) where {T}
+    T(dot(ones(T, length(f)), overlap_op * f))
 end
 
-LinearAlgebra.norm(ψ::AbstractMatrix{T}, basis::FiniteElementBasis{T}, field::Symbol) where {T} = 
-    map(col -> LinearAlgebra.norm(col, basis, field), eachcol(ψ))
-
-function integrate(f::AbstractVector{T}, basis::FiniteElementBasis{T}, field::Symbol) where {T}
-    T(dot(ones(T, length(f)), get_overlap_matrix(basis, field), f))
-end
-
-function solve_laplace(basis::FiniteElementBasis{T}, f::AbstractVector{T}, field::Symbol) where T
-    constraint_matrix = get_constraint_matrix(basis, field)
-    mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, field) * constraint_matrix
-    rhs = complex(get_overlap_matrix(basis, field) * f)
+function solve_laplace_density(basis::FiniteElementBasis{T}, ρ::AbstractVector{T}) where T
+    constraint_matrix = get_constraint_matrix(basis, :ρ)
+    mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, :ρ) * constraint_matrix
+    rhs = complex(get_overlap_matrix(basis, :ρ) * ρ)
     (x, stats) = minres_qlp(mat, rhs)
     stats.solved || error("Laplacian solve did not converge")
     return real(x)

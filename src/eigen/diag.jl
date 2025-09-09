@@ -103,7 +103,7 @@ function diagonalize_all_kblocks(eigensolver, ham::Hamiltonian{B}, nev_per_kpoin
 
         prec = nothing
         !isnothing(prec_type) && (prec = prec_type(ham[ik]))
-        results[ik] = eigensolver(ham[ik], ψguessk, get_overlap_matrix(ham.basis, :ψ);
+        results[ik] = eigensolver(ham[ik], ψguessk, ham.basis.overlap_ops[kpt];
                                   prec, tol, miniter, maxiter, n_conv_check)
     end
 
