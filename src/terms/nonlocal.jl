@@ -339,14 +339,16 @@ function build_projection_vectors(basis::FiniteElementBasis{T}, kpt::FEMKpoint,
 
     real_proj_vectors = zeros(Complex{eltype(psp_positions[1][1])}, get_n_free_dofs(basis, :ψ), n_proj)
     @views for i in 1:n_proj
-        periodic_func = nfft2(basis, reshape(proj_vectors[:, i], basis.nfft_size))[get_dof_map(basis)]
-        bloch_func = periodic_func .* cis2pi.(dot.([kpt.coordinate], map(vector_cart_to_red(basis.model), get_free_dof_positions(basis, :ψ))))
-        real_proj_vectors[:, i] = basis.overlap_ops[kpt] * bloch_func#basis.overlap_ops[kpt].constraint_matrix' * (get_overlap_matrix(basis, :ψ) * (right_constraint * real_func))
+        fourier_func = reshape(proj_vectors[:, i], basis.nfft_size)
+        enforce_real!(fourier_func, basis)
+        periodic_func = nfft2(basis, fourier_func)[get_dof_map(basis)]
+        bloch_func = periodic_func .* cis2pi.(-dot.([kpt.coordinate], map(vector_cart_to_red(basis.model), get_free_dof_positions(basis, :ψ))))
+        real_proj_vectors[:, i] = basis.overlap_ops[kpt] * bloch_func
     end
 
 
     VTKGridFile("density", get_dof_handler(basis, :ψ)) do vtk
-        write_solution(vtk, get_dof_handler(basis, :ψ), real(basis.overlap_ops[kpt].constraint_matrix * (nfft2(basis, reshape(proj_vectors[:, 3], basis.nfft_size))[get_dof_map(basis)] .* cis2pi.(dot.([kpt.coordinate], map(vector_cart_to_red(basis.model), get_free_dof_positions(basis, :ψ)))))))
+        write_solution(vtk, get_dof_handler(basis, :ψ), imag(basis.overlap_ops[kpt].constraint_matrix * (nfft2(basis, reshape(proj_vectors[:, 3], basis.nfft_size))[get_dof_map(basis)] .* cis2pi.(dot.([kpt.coordinate], map(vector_cart_to_red(basis.model), get_free_dof_positions(basis, :ψ)))))))
     end
 
     # Offload potential values to a device (like a GPU)
