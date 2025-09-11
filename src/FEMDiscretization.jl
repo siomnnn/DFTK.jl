@@ -330,26 +330,13 @@ function get_free_dof_positions(disc::FEMDiscretization{T}, field::Symbol) where
                             .+ cell.coords[2] * ref_coords[1, :]'
                             .+ cell.coords[3] * ref_coords[2, :]'
                             .+ cell.coords[4] * ref_coords[3, :]')
-        dof_coords[apply_inverse_constraint_map(disc, celldofs(cell), field)] .= SVector{3}.(eachcol(cell_dof_coords))
+        
+        free_dofs = get_free_dofs(disc, field)
+        free_dofs_in_cell = [(i, apply_inverse_constraint_map(disc, dof, field)) for (i, dof) in enumerate(celldofs(cell)) if dof in free_dofs]
+        @views for (i, free_dof) in free_dofs_in_cell
+            col = cell_dof_coords[:, i]
+            dof_coords[free_dof] = Vec3{T}(col)
+        end
     end
     return dof_coords
 end
-
-# The way Ferrite applies boundary conditions to vectors is not the way that we want it to.
-# In particular, it does not "merge" the values of periodic dofs, but rather overwrites one with
-# the other. Here, we need to consider all periodic dofs _not_ as redundant/overwritable,
-# but rather as components of the same coefficient -> overwrite them with their sum.
-function apply_bc!(f::AbstractVector, ch::ConstraintHandler)
-    for (i, pdof) in pairs(ch.prescribed_dofs)
-        dofcoef = ch.dofcoefficients[i]
-        if dofcoef !== nothing # if affine constraint
-            for (d, v) in dofcoef
-                f[d] += f[pdof] * v
-            end
-        end
-        f[pdof] = 0
-    end
-    return
-end
-
-remove_bc!(f::AbstractVector, ch::ConstraintHandler) = (f[ch.prescribed_dofs] .= 0)

@@ -62,7 +62,6 @@ function FiniteElementBasis(model::Model{T, VT},
                             nfft_size::Tuple{Int, Int, Int},
                             kpoints::Vector{FEMKpoint{T}},
                             kweights::Vector{T},
-                            precompute_laplacian::Bool,
                             architecture::Arch,
                            ) where {T, VT, Arch}
     @assert length(kpoints) == length(kweights) "kpoints and kweights must have the same length"
@@ -72,12 +71,9 @@ function FiniteElementBasis(model::Model{T, VT},
     ψ_overlap_matrix = init_overlap_matrix(discretization, :ψ)
     ρ_overlap_matrix = init_overlap_matrix(discretization, :ρ)
 
-    ψ_neg_half_laplacian = nothing
-    ρ_neg_half_laplacian = nothing
-    if precompute_laplacian
-        ψ_neg_half_laplacian = init_neg_half_laplace_matrix(discretization, :ψ)
-        ρ_neg_half_laplacian = init_neg_half_laplace_matrix(discretization, :ρ)
-    end
+    ψ_neg_half_laplacian = init_neg_half_laplace_matrix(discretization, :ψ)
+    ρ_neg_half_laplacian = init_neg_half_laplace_matrix(discretization, :ρ)
+
     refinement_matrix = init_refinement_matrix(discretization)
 
     # NFFT only likes nodes in [-0.5, 0.5)
@@ -130,7 +126,6 @@ disabled by setting `precompute_laplacian=false`.
                                     nfft_size=nothing,
                                     kpoints::Vector{FEMKpoint{T}}=[FEMKpoint(1, Vec3{T}(0, 0, 0))],
                                     kweights::Vector{T}=[one(T)],
-                                    precompute_laplacian=true,
                                     architecture=CPU(),
                                     write_to_file=false,
                                     filename="mesh.msh"
@@ -146,7 +141,7 @@ disabled by setting `precompute_laplacian=false`.
 
     discretization = FEMDiscretization(model.lattice, grid; degree)
 
-    FiniteElementBasis(model, austrip(h), degree, discretization, nfft_size, kpoints, kweights, precompute_laplacian, architecture)
+    FiniteElementBasis(model, austrip(h), degree, discretization, nfft_size, kpoints, kweights, architecture)
 end
 
 # prevent broadcast
@@ -353,9 +348,23 @@ function weighted_ksum(basis::FiniteElementBasis, array)
 end
 
 G_vectors(basis::FiniteElementBasis) = G_vectors(basis.nfft_grid)
+G_vectors(basis::FiniteElementBasis, kpt::FEMKpoint) = reshape(G_vectors(basis.nfft_grid), :)
 
 function G_vectors_cart(basis::FiniteElementBasis)
     map(recip_vector_red_to_cart(basis.model), G_vectors(basis))
+end
+
+function G_vectors_cart(basis::FiniteElementBasis, kpt::FEMKpoint)
+    map(recip_vector_red_to_cart(basis.model), G_vectors(basis, kpt))
+end
+
+function Gplusk_vectors(basis::FiniteElementBasis, kpt::FEMKpoint)
+    coordinate = kpt.coordinate  # Accelerator: avoid closure on kpt (not isbits)
+    map(G -> G + coordinate, G_vectors(basis, kpt))
+end
+
+function Gplusk_vectors_cart(basis::FiniteElementBasis, kpt::FEMKpoint)
+    map(recip_vector_red_to_cart(basis.model), Gplusk_vectors(basis, kpt))
 end
 
 """
