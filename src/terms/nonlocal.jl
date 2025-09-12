@@ -346,11 +346,6 @@ function build_projection_vectors(basis::FiniteElementBasis{T}, kpt::FEMKpoint,
         real_proj_vectors[:, i] = basis.overlap_ops[kpt] * bloch_func
     end
 
-
-    VTKGridFile("density", get_dof_handler(basis, :ψ)) do vtk
-        write_solution(vtk, get_dof_handler(basis, :ψ), imag(basis.overlap_ops[kpt].constraint_matrix * (nfft2(basis, reshape(proj_vectors[:, 3], basis.nfft_size))[get_dof_map(basis)] .* cis2pi.(dot.([kpt.coordinate], map(vector_cart_to_red(basis.model), get_free_dof_positions(basis, :ψ)))))))
-    end
-
     # Offload potential values to a device (like a GPU)
     to_device(basis.architecture, real_proj_vectors)
 end

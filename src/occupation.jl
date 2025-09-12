@@ -122,7 +122,7 @@ end
 # TODO: unify once MPI is implemented
 function compute_fermi_level(basis::FiniteElementBasis{T}, eigenvalues, ::FermiBisection;
                              temperature, smearing, tol_n_elec) where {T}
-    if iszero(temperature)
+    if iszero(temperature) && !(basis isa FiniteElementBasis)
         return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
                                    temperature, smearing, tol_n_elec)
     end
@@ -158,7 +158,7 @@ Two-stage Fermi level finding algorithm starting from a Gaussian-smearing guess.
 struct FermiTwoStage <: AbstractFermiAlgorithm end
 function compute_fermi_level(basis::AbstractBasis{T}, eigenvalues, ::FermiTwoStage;
                              temperature, smearing, tol_n_elec) where {T}
-    if iszero(temperature)
+    if iszero(temperature) && !(basis isa FiniteElementBasis)
         return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
                                    temperature, smearing, tol_n_elec)
     end

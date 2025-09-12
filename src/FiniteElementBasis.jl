@@ -37,6 +37,7 @@ struct FiniteElementBasis{T,
     nfft_size::Tuple{Int, Int, Int}
     nfft_grid::NFFTtype
 
+    kgrid::AbstractKgrid
     kpoints::Vector{FEMKpoint{T}}
     kweights::Vector{T}
 
@@ -60,11 +61,9 @@ function FiniteElementBasis(model::Model{T, VT},
                             degree::Int,
                             discretization::FEMDiscretization{T},
                             nfft_size::Tuple{Int, Int, Int},
-                            kpoints::Vector{FEMKpoint{T}},
-                            kweights::Vector{T},
+                            kgrid::AbstractKgrid,
                             architecture::Arch,
                            ) where {T, VT, Arch}
-    @assert length(kpoints) == length(kweights) "kpoints and kweights must have the same length"
     overlap_ops = Dict{FEMKpoint{T}, Any}()
     terms = Vector{Any}(undef, length(model.term_types))  # Dummy terms array, filled below
 
@@ -84,13 +83,16 @@ function FiniteElementBasis(model::Model{T, VT},
     end
     nfft_grid = NFFTGrid(nfft_size, reduced_dof_coords, model.unit_cell_volume, architecture)
 
+    kpoints = reshape([FEMKpoint{T}(iσ, Vec3{T}(k)) for k in reducible_kcoords(kgrid).kcoords for iσ = 1:model.n_spin_components], :)
+    kweights = kgrid isa ExplicitKpoints ? kgrid.kweights : ones(T, length(kpoints)) / length(kpoints)
+
     symmetries = [symop for symop in model.symmetries if isone(symop)]  # only identities
 
     basis = FiniteElementBasis{T, VT, typeof(nfft_grid), Arch}(model, austrip(h), degree, discretization,
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
                                            refinement_matrix, nfft_size, nfft_grid,
-                                           kpoints, kweights, overlap_ops,
+                                           kgrid, kpoints, kweights, overlap_ops,
                                            architecture, symmetries, terms)
 
     for kpoint in kpoints
@@ -124,8 +126,8 @@ disabled by setting `precompute_laplacian=false`.
                                     degree::Int=1,
                                     grid=nothing,
                                     nfft_size=nothing,
-                                    kpoints::Vector{FEMKpoint{T}}=[FEMKpoint(1, Vec3{T}(0, 0, 0))],
-                                    kweights::Vector{T}=[one(T)],
+                                    kgrid=nothing,
+                                    kshift=[0, 0, 0],
                                     architecture=CPU(),
                                     write_to_file=false,
                                     filename="mesh.msh"
@@ -141,7 +143,15 @@ disabled by setting `precompute_laplacian=false`.
 
     discretization = FEMDiscretization(model.lattice, grid; degree)
 
-    FiniteElementBasis(model, austrip(h), degree, discretization, nfft_size, kpoints, kweights, architecture)
+    if isnothing(kgrid)
+        kgrid_inner = kgrid_from_maximal_spacing(model, 2π * 0.022; kshift)
+    elseif kgrid isa AbstractKgrid
+        kgrid_inner = kgrid
+    else
+        kgrid_inner = MonkhorstPack(kgrid, kshift)
+    end
+
+    FiniteElementBasis(model, austrip(h), degree, discretization, nfft_size, kgrid_inner, architecture)
 end
 
 # prevent broadcast
@@ -295,7 +305,7 @@ function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T
             push!(J, j)
 
             lattice_dir = [pdof in periodic_dofset[i] for i in 1:3]
-            phase = cis2pi(dot(k, lattice_dir))
+            phase = cis2pi(-dot(k, lattice_dir))
             push!(vals, phase)
         end
     end
