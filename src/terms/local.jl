@@ -28,7 +28,8 @@ end
     ops = [FEMRealSpaceMultiplication(basis, kpt, potview(term.potential_values, kpt.spin))
            for kpt in basis.kpoints]
     if :ρ in keys(kwargs)
-        E = real(dot(total_density_FEM(kwargs[:ρ]), get_overlap_matrix(basis, :ρ), term.potential_values))
+        constraint_matrix = get_constraint_matrix(basis, :ρ)
+        E = real(dot(real(constraint_matrix * total_density_FEM(kwargs[:ρ])), get_overlap_matrix(basis, :ρ), real(constraint_matrix * term.potential_values)))
     else
         E = T(Inf)
     end

@@ -338,7 +338,7 @@ end
             (; energies) = energy(basis, ψ, occupation; ρ=ρout, τ, eigenvalues, εF)
         end
         history_Etot = vcat(info.history_Etot, energies.total)
-        history_Δρ = vcat(info.history_Δρ, weighted_norm(Δρ, get_overlap_matrix(basis, :ρ)))
+        history_Δρ = vcat(info.history_Δρ, weighted_norm(real(get_constraint_matrix(basis, :ρ) * Δρ), get_overlap_matrix(basis, :ρ)))
         n_matvec = info.n_matvec + nextstate.n_matvec
         info_next = merge(info_next, (; energies, history_Etot, history_Δρ, n_matvec))
 

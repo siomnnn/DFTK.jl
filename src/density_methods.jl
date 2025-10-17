@@ -31,7 +31,7 @@ end
 function random_density(basis::FiniteElementBasis{T}, n_electrons::Integer) where {T}
     n_dofs = get_n_free_dofs(basis, :ρ)
     ρtot  = rand(T, n_dofs)
-    ρtot  = ρtot .* n_electrons ./ integrate(ρtot, get_overlap_matrix(basis, :ρ))     # Integration to n_electrons
+    ρtot  = ρtot .* n_electrons ./ integrate(real(get_constraint_matrix(basis, :ρ) * ρtot), get_overlap_matrix(basis, :ρ))     # Integration to n_electrons
     ρspin = nothing
     if basis.model.n_spin_components > 1
         ρspin = rand((-1, 1), n_dofs) .* rand(T, n_dofs) .* ρtot
@@ -113,7 +113,7 @@ function atomic_density(basis::FiniteElementBasis, method::AtomicDensity, magnet
     ρspin = atomic_spin_density(basis, method, magnetic_moments)
     ρ = ρ_from_total_and_spin_FEM(ρtot, ρspin)
 
-    N = sum(integrate(ρi, get_overlap_matrix(basis, :ρ)) for ρi in eachcol(ρ))
+    N = real(sum(integrate(get_constraint_matrix(basis, :ρ) * ρi, get_overlap_matrix(basis, :ρ)) for ρi in eachcol(ρ)))
 
     if !isnothing(n_electrons) && (N > 0)
         ρ .*= n_electrons / N  # Renormalize to the correct number of electrons

@@ -65,7 +65,7 @@ end
 
     function allocate_local_storage()
         (; ρ=zeros(Tρ, get_n_free_dofs(basis, :ρ), basis.model.n_spin_components),
-         ψnk_fine=zeros(complex(Tψ), get_n_free_dofs(basis, :ρ)))
+         ψnk_fine=zeros(complex(Tψ), get_n_free_dofs(basis, :ρ)), ψnk_constraints=zeros(complex(Tψ), get_n_dofs(basis, :ρ)))
     end
     # We split the total iteration range (ik, n) in chunks, and parallelize over them.
     range = [(ik, n) for ik = 1:length(basis.kpoints) for n = mask_occ[ik]]
@@ -74,7 +74,8 @@ end
         (ik, n) = kn
         kpt = basis.kpoints[ik]
         mul!(storage.ψnk_fine, get_refinement_matrix(basis),  ψ[ik][:, n])
-        storage.ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_fine) ./ integrate(abs2.(storage.ψnk_fine), get_overlap_matrix(basis, :ρ)))
+        mul!(storage.ψnk_constraints, get_constraint_matrix(basis, kpt, :ρ), storage.ψnk_fine)
+        storage.ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_fine) ./ integrate(abs2.(storage.ψnk_constraints), get_overlap_matrix(basis, :ρ)))
 
         synchronize_device(basis.architecture)
     end

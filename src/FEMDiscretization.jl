@@ -248,10 +248,6 @@ function init_overlap_matrix(disc::FEMDiscretization{T}, field::Symbol) where T
         assemble!(assembler, celldofs(cell), Ke)
     end
 
-    if field == :ρ
-        Ferrite.apply!(H, ch)
-        return H[ch.free_dofs, ch.free_dofs]
-    end
     H
 end
 

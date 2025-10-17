@@ -31,6 +31,7 @@ struct FiniteElementBasis{T,
 
     ρ_overlap_matrix::AbstractMatrix{T}
     ρ_neg_half_laplacian::Union{AbstractMatrix{T}, Nothing}
+    ρ_constraint_matrix::AbstractMatrix{Complex{T}}
 
     refinement_matrix::AbstractMatrix{T}        # Matrix to refine a function from the coarser ψ interpolation to the finer ρ interpolation (ψ_fine = refinement_matrix * ψ_coarse).
     
@@ -91,6 +92,7 @@ function FiniteElementBasis(model::Model{T, VT},
     basis = FiniteElementBasis{T, VT, typeof(nfft_grid), Arch}(model, austrip(h), degree, discretization,
                                            ψ_overlap_matrix, ψ_neg_half_laplacian,
                                            ρ_overlap_matrix, ρ_neg_half_laplacian,
+                                           get_constraint_matrix(discretization, :ρ),
                                            refinement_matrix, nfft_size, nfft_grid,
                                            kgrid, kpoints, kweights, overlap_ops,
                                            architecture, symmetries, terms)
@@ -280,10 +282,10 @@ function get_neg_half_laplace_matrix(basis::FiniteElementBasis, field::Symbol)
     end
 end
 
-function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T}, field::Symbol) where {T}
+@timing function get_constraint_matrix(disc::FEMDiscretization{T}, kpoint::FEMKpoint{T}, field::Symbol) where {T}
     k = kpoint.coordinate
 
-    ch = get_constraint_handler(basis, field)
+    ch = get_constraint_handler(disc, field)
     
     I, J, vals = Int[], Int[], Complex{T}[]
 
@@ -293,7 +295,7 @@ function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T
         push!(vals, 1.0)
     end
 
-    periodic_dofset = get_periodic_dofset(basis.discretization, field)
+    periodic_dofset = get_periodic_dofset(disc, field)
 
     for (i, pdof) in enumerate(ch.prescribed_dofs)
         dofcoef = ch.dofcoefficients[i]
@@ -310,12 +312,19 @@ function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T
         end
     end
 
-    return sparse(I, J, vals, get_n_dofs(basis, field), get_n_free_dofs(basis, field), (x, y) -> x)
+    return sparse(I, J, vals, get_n_dofs(disc, field), get_n_free_dofs(disc, field), (x, y) -> x)
 end
 
-function get_constraint_matrix(basis::FiniteElementBasis{T}, field::Symbol) where {T}
-    get_constraint_matrix(basis, FEMKpoint(1, Vec3{T}(0, 0, 0)), field)
+function get_constraint_matrix(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T}, field::Symbol) where {T}
+    get_constraint_matrix(basis.discretization, kpoint, field)
 end
+
+function get_constraint_matrix(disc::FEMDiscretization{T}, field::Symbol) where {T}
+    get_constraint_matrix(disc, FEMKpoint(1, Vec3{T}(0, 0, 0)), field)
+end
+
+get_constraint_matrix(basis::FiniteElementBasis{T}, field::Symbol) where {T} =
+    basis.ρ_constraint_matrix
 
 function get_overlap_matrix(basis::FiniteElementBasis, field::Symbol)
     if field == :ψ
@@ -339,12 +348,35 @@ function integrate(f::AbstractVector{T}, overlap_op) where {T}
     T(dot(ones(T, length(f)), overlap_op * f))
 end
 
+# don't allocate the full matrix C'MC every time
+struct DensityLaplacian{T <: Real} <: AbstractMatrix{Complex{T}}
+    constraint_matrix::AbstractMatrix{Complex{T}}
+    neg_half_laplacian::AbstractMatrix{T}
+    scratch1::Vector{Complex{T}}  # to avoid allocations
+    scratch2::Vector{Complex{T}}  
+end
+function DensityLaplacian(constraint_matrix::AbstractMatrix{Complex{T}}, neg_half_laplacian::AbstractMatrix{T}) where {T}
+    scratch = similar(constraint_matrix, Complex{T}, size(neg_half_laplacian, 1))
+    DensityLaplacian{T}(constraint_matrix, neg_half_laplacian, scratch, similar(scratch))
+end
+Base.:*(dens_lap::DensityLaplacian{T}, ρ::AbstractVector{T}) where {T} = 
+    mul!(similar(dens_lap.constraint_matrix, Complex{T}, size(dens_lap, 1)), dens_lap, ρ)
+function LinearAlgebra.mul!(y::AbstractVector, dens_lap::DensityLaplacian, ρ::AbstractVector)
+    mul!(dens_lap.scratch1, dens_lap.constraint_matrix, ρ)
+    mul!(dens_lap.scratch2, dens_lap.neg_half_laplacian, dens_lap.scratch1)
+    mul!(y, dens_lap.constraint_matrix', dens_lap.scratch2)
+end
+
+Base.size(dens_lap::DensityLaplacian) = (size(dens_lap.constraint_matrix, 2), size(dens_lap.constraint_matrix, 2))
+Base.eltype(::DensityLaplacian{T}) where {T} = Complex{T}
+
 function solve_laplace_density(basis::FiniteElementBasis{T}, ρ::AbstractVector{T}) where T
     constraint_matrix = get_constraint_matrix(basis, :ρ)
-    mat = constraint_matrix' * get_neg_half_laplace_matrix(basis, :ρ) * constraint_matrix
-    rhs = complex(get_overlap_matrix(basis, :ρ) * ρ)
+    neg_half_laplacian = get_neg_half_laplace_matrix(basis, :ρ)
+    mat = DensityLaplacian(constraint_matrix, neg_half_laplacian)
+    rhs = constraint_matrix' * get_overlap_matrix(basis, :ρ) * constraint_matrix * ρ
     (x, stats) = minres_qlp(mat, rhs)
-    stats.solved || error("Laplacian solve did not converge")
+    stats.solved || error("Laplacian solve did not converge. Are you sure your RHS has zero mean?")
     return real(x)
 end
 

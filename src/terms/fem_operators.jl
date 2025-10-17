@@ -63,14 +63,17 @@ Hψ = |ϕ_i><ϕ_i|V|ψ>.
 struct FEMRealSpaceMultiplication{T <: Real, AT <: AbstractArray} <: FEMOperator
     basis::FiniteElementBasis{T}
     kpoint::FEMKpoint{T}
+    constraint_matrix::AbstractMatrix{Complex{T}}
     potential::AT
 end
+FEMRealSpaceMultiplication(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T}, potential::AbstractVector{T}) where {T} =
+    FEMRealSpaceMultiplication{T, typeof(potential)}(basis, kpoint, get_constraint_matrix(basis, kpoint, :ρ), potential)
 # We have to compute <ϕ_i|V|ψ> = ∫ ϕ_i(r) V(r) ψ(r) dr for ψ(r) = Σ_j ϕ_j(r) ψ_j, V(r) = Σ_k χ_k(r) V_k, where ϕ_i are
 # the basis functions for ψ (degree m) and χ_k the basis functions for ρ (degree 2m). We expand ϕ_i(r) in the basis
 # of χ_k(r) (this results in R * ψ), multiply by ϕ_j(r) (this is R .* (R * ψ)) and then integrate against V_k (this is V' * M_ρ * (R .* (R * ψ))).
 # All of this is done in an efficient way (minimal number of matvec operations).
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    M_ρV = get_overlap_matrix(op.basis, :ρ) * op.potential
+    M_ρV = op.constraint_matrix' * (get_overlap_matrix(op.basis, :ρ) * (get_constraint_matrix(op.basis, :ρ) * op.potential))
 
     R = get_refinement_matrix(op.basis)
     Rψ = R * ψ
@@ -81,7 +84,7 @@ function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
     Hψ .+= transpose(M_ρV' * R_copy)
 end
 function Matrix(op::FEMRealSpaceMultiplication)
-    M_ρV = get_overlap_matrix(op.basis, :ρ) * op.potential
+    M_ρV = get_constraint_matrix(op.basis, op.kpoint, :ρ)' * get_overlap_matrix(op.basis, :ρ) * get_constraint_matrix(op.basis, :ρ) * op.potential
     R = get_refinement_matrix(op.basis)
 
     out_cols = []
