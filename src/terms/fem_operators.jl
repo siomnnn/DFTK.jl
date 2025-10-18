@@ -73,13 +73,13 @@ FEMRealSpaceMultiplication(basis::FiniteElementBasis{T}, kpoint::FEMKpoint{T}, p
 # of χ_k(r) (this results in R * ψ), multiply by ϕ_j(r) (this is R .* (R * ψ)) and then integrate against V_k (this is V' * M_ρ * (R .* (R * ψ))).
 # All of this is done in an efficient way (minimal number of matvec operations).
 function apply!(Hψ, op::FEMRealSpaceMultiplication, ψ)
-    M_ρV = op.constraint_matrix' * (get_overlap_matrix(op.basis, :ρ) * (get_constraint_matrix(op.basis, :ρ) * op.potential))
+    M_ρV = get_overlap_matrix(op.basis, :ρ) * (get_constraint_matrix(op.basis, :ρ) * op.potential)
 
     R = get_refinement_matrix(op.basis)
-    Rψ = R * ψ
+    Rψ = op.constraint_matrix * R * ψ
 
-    R_copy = Complex.(R)
-    R_copy.nzval .= R_copy.nzval .* Rψ[R_copy.rowval]       # SparseArrays isn't smart enough to optimize terms with structural zeros, wayyy faster than R .* Rψ
+    R_copy = op.constraint_matrix * R
+    R_copy.nzval .= conj(R_copy.nzval) .* Rψ[R_copy.rowval]       # SparseArrays isn't smart enough to optimize terms with structural zeros, wayyy faster than R .* Rψ
 
     Hψ .+= transpose(M_ρV' * R_copy)
 end

@@ -73,7 +73,7 @@ function setup_dofs(grid::Grid, ip::Interpolation, field::Symbol)
 end
 
 function setup_cell_values(ip::Interpolation{S}; degree=2) where {S <: Ferrite.AbstractRefShape}
-    qr = QuadratureRule{S}(degree)
+    qr = QuadratureRule{S}(2*degree)
     cv = CellValues(qr, ip)
     return cv
 end
