@@ -21,6 +21,22 @@ abstract type TermLocalPotential <: TermLinear end
     (; E, ops)
 end
 
+@timing "ene_ops: FEM local" function ene_ops(term::TermLocalPotential,
+                                          basis::FiniteElementBasis{T}, ψ, occupation;
+                                          kwargs...) where {T}
+    potview(data, spin) = ndims(data) == 4 ? (@view data[:, :, :, spin]) : data
+    ops = [FEMRealSpaceMultiplication(basis, kpt, potview(term.potential_values, kpt.spin))
+           for kpt in basis.kpoints]
+    if :ρ in keys(kwargs)
+        constraint_matrix = get_constraint_matrix(basis, :ρ)
+        E = real(dot(real(constraint_matrix * total_density_FEM(kwargs[:ρ])), get_overlap_matrix(basis, :ρ), real(constraint_matrix * term.potential_values)))
+    else
+        E = T(Inf)
+    end
+
+    (; E, ops)
+end
+
 ## External potentials
 
 struct TermExternal <: TermLocalPotential
@@ -38,6 +54,10 @@ function (external::ExternalFromValues)(basis::PlaneWaveBasis{T}) where {T}
     @assert size(external.potential_values)[1:3] == basis.fft_size
     TermExternal(convert_dual.(T, external.potential_values))
 end
+function (external::ExternalFromValues)(basis::FiniteElementBasis{T}) where {T}
+    @assert length(external.potential_values) == get_n_free_dofs(basis, :ρ)
+    TermExternal(convert_dual.(T, external.potential_values))
+end
 
 """
 External potential from an analytic function `V` (in Cartesian coordinates).
@@ -46,9 +66,12 @@ No low-pass filtering is performed.
 struct ExternalFromReal
     potential::Function
 end
-
 function (external::ExternalFromReal)(basis::PlaneWaveBasis{T}) where {T}
     pot_real = external.potential.(r_vectors_cart(basis))
+    TermExternal(convert_dual.(T, pot_real))
+end
+function (external::ExternalFromReal)(basis::FiniteElementBasis{T}) where {T}
+    pot_real = external.potential.(get_free_dof_positions(basis, :ρ))
     TermExternal(convert_dual.(T, pot_real))
 end
 
@@ -71,7 +94,7 @@ end
 Returns the form factors at unique values of |G + q| (in Cartesian coordinates).
 Additionally, returns a mapping from any G index to the corresponding entry in the form_factors array.
 """
-function atomic_local_form_factors(basis::PlaneWaveBasis{T}; q=zero(Vec3{T})) where{T}
+function atomic_local_form_factors(basis::AbstractBasis{T}; q=zero(Vec3{T})) where{T}
     Gqs_cart = [basis.model.recip_lattice * (G + q) for G in to_cpu(G_vectors(basis))]
 
     iG2ifnorm_cpu = zeros(Int, length(Gqs_cart))
@@ -135,6 +158,35 @@ function compute_local_potential(basis::PlaneWaveBasis{T}; positions=basis.model
     end
 end
 (::AtomicLocal)(basis::PlaneWaveBasis{T}) where {T} =
+    TermAtomicLocal(compute_local_potential(basis))
+
+function compute_local_potential(basis::FiniteElementBasis{T}; positions=basis.model.positions) where {T}
+    # pot_fourier is <e_G|V|e_G'> expanded in a basis of e_{G-G'}
+    # Since V is a sum of radial functions located at atomic
+    # positions, this involves a form factor (`local_potential_fourier`)
+    # and a structure factor e^{-i G·r}
+    form_factors, iG2ifnorm = atomic_local_form_factors(basis)
+    Gs = G_vectors(basis)
+
+    # Pre-allocation of large arrays for GPU efficiency
+    Tpot = promote_type(eltype(form_factors), eltype(eltype(positions)))
+    pot = to_device(basis.architecture, zeros(Complex{Tpot}, length(Gs)))
+    pot_tmp = similar(pot)
+    indices = to_device(basis.architecture, collect(1:length(Gs)))
+
+    for (igroup, group) in enumerate(basis.model.atom_groups)
+        for r in positions[group]
+            ff_group = @view form_factors[:, igroup]
+            map!(iG -> cis2pi(-dot(Gs[iG], r)) * ff_group[iG2ifnorm[iG]], pot_tmp, indices)
+            pot .+= pot_tmp ./ sqrt(basis.model.unit_cell_volume)
+        end
+    end
+
+    pot_fourier = reshape(pot, basis.nfft_size)
+    enforce_real!(pot, basis)  # Symmetrize coeffs to have real iNFFT
+    return rnfft2(basis, pot_fourier)
+end
+(::AtomicLocal)(basis::FiniteElementBasis{T}) where {T} =
     TermAtomicLocal(compute_local_potential(basis))
 
 function compute_forces(::TermAtomicLocal, basis::PlaneWaveBasis{T}, ψ, occupation;

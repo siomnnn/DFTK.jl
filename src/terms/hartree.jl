@@ -15,7 +15,8 @@ struct Hartree
     scaling_factor::Real  # to scale by an arbitrary factor (useful for exploration)
 end
 Hartree(; scaling_factor=1) = Hartree(scaling_factor)
-(hartree::Hartree)(basis)   = TermHartree(basis, hartree.scaling_factor)
+(hartree::Hartree)(basis::PlaneWaveBasis)     = TermHartree(basis, hartree.scaling_factor)
+(hartree::Hartree)(basis::FiniteElementBasis) = TermHartreeFEM(basis, hartree.scaling_factor)
 function Base.show(io::IO, hartree::Hartree)
     fac = isone(hartree.scaling_factor) ? "" : ", scaling_factor=$(hartree.scaling_factor)"
     print(io, "Hartree($fac)")
@@ -45,6 +46,13 @@ function TermHartree(basis::PlaneWaveBasis{T}, scaling_factor) where {T}
     TermHartree(T(scaling_factor), poisson_green_coeffs)
 end
 
+struct TermHartreeFEM <: TermNonlinear
+    scaling_factor::Real
+end
+function TermHartreeFEM(basis::FiniteElementBasis{T}, scaling_factor) where {T}
+    TermHartreeFEM(T(scaling_factor))
+end
+
 @timing "ene_ops: hartree" function ene_ops(term::TermHartree, basis::PlaneWaveBasis{T},
                                             ψ, occupation; ρ, kwargs...) where {T}
     ρtot_fourier = fft(basis, total_density(ρ))
@@ -53,6 +61,17 @@ end
     E = real(dot(pot_fourier, ρtot_fourier) / 2)
 
     ops = [RealSpaceMultiplication(basis, kpt, pot_real) for kpt in basis.kpoints]
+    (; E, ops)
+end
+@timing "ene_ops: FEM hartree" function ene_ops(term::TermHartreeFEM, basis::FiniteElementBasis{T},
+                                            ψ, occupation; ρ, kwargs...) where {T}
+    ρtot = total_density_FEM(ρ)
+    ρ_zero_mean = 2pi * (ρtot .- basis.model.n_electrons / basis.model.unit_cell_volume)
+    pot = solve_laplace_density(basis, ρ_zero_mean)*term.scaling_factor
+    constraint_matrix = get_constraint_matrix(basis, :ρ)
+    E = real(dot(real(constraint_matrix * pot), get_overlap_matrix(basis, :ρ), real(constraint_matrix * ρtot)) / 2)
+
+    ops = [FEMRealSpaceMultiplication(basis, kpt, pot) for kpt in basis.kpoints]
     (; E, ops)
 end
 

@@ -28,6 +28,28 @@ struct TermAtomicNonlocal <: TermLinear
     ops::Vector{NonlocalOperator}
 end
 
+function (::AtomicNonlocal)(basis::FiniteElementBasis{T}) where {T}
+    model = basis.model
+
+    # keep only pseudopotential atoms and positions
+    psp_groups = [group for group in model.atom_groups
+                  if model.atoms[first(group)] isa ElementPsp]
+    psps          = [model.atoms[first(group)].psp      for group in psp_groups]
+    psp_positions = [model.positions[group] for group in psp_groups]
+
+    isempty(psp_groups) && return TermNoop()
+    ops = map(basis.kpoints) do kpt
+        P = build_projection_vectors(basis, kpt, psps, psp_positions)
+        D = build_projection_coefficients(T, psps, psp_positions)
+        NonlocalFEMOperator(basis, kpt, P, to_device(basis.architecture, D))
+    end
+    TermAtomicNonlocalFEM(ops)
+end
+
+struct TermAtomicNonlocalFEM <: Term
+    ops::Vector{NonlocalFEMOperator}
+end
+
 @timing "ene_ops: nonlocal" function ene_ops(term::TermAtomicNonlocal,
                                              basis::PlaneWaveBasis{T},
                                              ψ, occupation; kwargs...) where {T}
@@ -42,6 +64,24 @@ end
         E += basis.kweights[ik] * sum(band_enes .* occupation[ik])
     end
     E = mpi_sum(E, basis.comm_kpts)
+
+    (; E, term.ops)
+end
+
+# TODO: duplicate code. Any way to merge these even though the argument types are different?
+@timing "ene_ops: nonlocal" function ene_ops(term::TermAtomicNonlocalFEM,
+                                             basis::FiniteElementBasis{T},
+                                             ψ, occupation; kwargs...) where {T}
+    if isnothing(ψ) || isnothing(occupation)
+        return (; E=T(Inf), term.ops)
+    end
+
+    E = zero(T)
+    for (ik, ψk) in enumerate(ψ)
+        Pψk = term.ops[ik].P' * ψk  # nproj x nband
+        band_enes = dropdims(sum(real.(conj.(Pψk) .* (term.ops[ik].D * Pψk)), dims=1), dims=1)
+        E += basis.kweights[ik] * sum(band_enes .* occupation[ik])
+    end
 
     (; E, term.ops)
 end
@@ -283,6 +323,51 @@ function build_form_factors(fun::Function, l::Int,
     end
 
     form_factors
+end
+
+function build_projection_vectors(basis::FiniteElementBasis{T}, kpt::FEMKpoint,
+                                  psps::AbstractVector{<: NormConservingPsp},
+                                  psp_positions) where {T}
+    unit_cell_volume = basis.model.unit_cell_volume
+    n_proj = count_n_proj(psps, psp_positions)
+    n_G    = length(G_vectors(basis, kpt))
+    proj_vectors = zeros(Complex{eltype(psp_positions[1][1])}, n_G, n_proj)
+    G_plus_k = to_cpu(Gplusk_vectors(basis, kpt))
+
+    # Compute the columns of proj_vectors = 1/√Ω \hat proj_i(k+G)
+    # Since the proj_i are translates of each others, \hat proj_i(k+G) decouples as
+    # \hat proj_i(p) = ∫ proj(r-R) e^{-ip·r} dr = e^{-ip·R} \hat proj(p).
+    # The first term is the structure factor, the second the form factor.
+    offset = 0  # offset into proj_vectors
+    for (psp, positions) in zip(psps, psp_positions)
+        # Compute position-independent form factors
+        G_plus_k_cart = to_cpu(Gplusk_vectors_cart(basis, kpt))
+        form_factors = build_projector_form_factors(psp, G_plus_k_cart)
+
+        # Combine with structure factors
+        for r in positions
+            # k+G in this formula can also be G, this only changes an unimportant phase factor
+            structure_factors = map(p -> cis2pi(-dot(p, r)), G_plus_k)
+            @views for iproj = 1:count_n_proj(psp)
+                proj_vectors[:, offset+iproj] .=
+                    structure_factors .* form_factors[:, iproj] ./ sqrt(unit_cell_volume)
+            end
+            offset += count_n_proj(psp)
+        end
+    end
+    @assert offset == n_proj
+
+    real_proj_vectors = zeros(Complex{eltype(psp_positions[1][1])}, get_n_free_dofs(basis, :ψ), n_proj)
+    @views for i in 1:n_proj
+        fourier_func = reshape(proj_vectors[:, i], basis.nfft_size)
+        enforce_real!(fourier_func, basis)
+        periodic_func = nfft2(basis, fourier_func)[get_dof_map(basis)]
+        bloch_func = periodic_func .* cis2pi.(-dot.([kpt.coordinate], map(vector_cart_to_red(basis.model), get_free_dof_positions(basis, :ψ))))
+        real_proj_vectors[:, i] = basis.overlap_ops[kpt] * bloch_func
+    end
+
+    # Offload potential values to a device (like a GPU)
+    to_device(basis.architecture, real_proj_vectors)
 end
 
 # Helpers for phonon computations.

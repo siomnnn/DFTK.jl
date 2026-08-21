@@ -85,6 +85,11 @@ function random_orbitals(basis::PlaneWaveBasis{T}, kpt::Kpoint, howmany::Integer
     ortho_qr(orbitals)
 end
 
+function random_orbitals(basis::FiniteElementBasis{T}, kpt::FEMKpoint, howmany::Integer) where {T}
+    orbitals = Array{Complex{T}}(undef, get_n_free_dofs(basis, :ψ), howmany)
+    randn!(TaskLocalRNG(), orbitals)  # use the RNG on the device if we're using a GPU
+    ortho_qr(orbitals)
+end
 function random_orbitals(basis::AbstractBasis, howmany::Integer)
     map(basis.kpoints) do kpt
         random_orbitals(basis, kpt, howmany)

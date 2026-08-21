@@ -1,6 +1,7 @@
 using DftFunctionals
 
 include("operators.jl")
+include("fem_operators.jl")
 
 ### Terms
 # - A Term is something that, given a state, returns a named tuple (; E, hams) with an energy
@@ -41,6 +42,10 @@ A term with a constant zero energy.
 struct TermNoop <: TermLinear end
 function ene_ops(term::TermNoop, basis::PlaneWaveBasis{T}, ψ, occupation; kwargs...) where {T}
     (; E=zero(eltype(T)), ops=[NoopOperator(basis, kpt) for kpt in basis.kpoints])
+end
+function ene_ops(term::TermNoop, basis::FiniteElementBasis{T}, ψ, occupation; kwargs...) where {T}
+    (; E=zero(eltype(T)), ops=[NoopFEMOperator(basis)])
+    
 end
 
 include("Hamiltonian.jl")

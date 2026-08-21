@@ -50,8 +50,12 @@ function (cb::ScfDefaultCallback)(info)
         # Average number of diagonalizations per k-point needed for this SCF step
         # Note: If two Hamiltonian diagonalizations have been used (e.g. adaptive damping),
         # the per k-point values are summed.
-        diagiter = mpi_mean(sum(mean(diag.n_iter) for diag in info.diagonalization),
-                            info.basis.comm_kpts)
+        if info.basis isa PlaneWaveBasis               # TODO: remove once FEM supports MPI
+            diagiter = mpi_mean(sum(mean(diag.n_iter) for diag in info.diagonalization),
+                                info.basis.comm_kpts)
+        else
+            diagiter = sum(mean(diag.n_iter) for diag in info.diagonalization)
+        end
     end
 
     show_gpumem = false
@@ -82,8 +86,14 @@ function (cb::ScfDefaultCallback)(info)
         println(label_damp[2], label_diag[2], label_time[2], label_memo[2], label_dmem[2])
     end
     E    = isnothing(info.energies) ? Inf : info.energies.total
-    magn = sum(spin_density(info.ρ)) * info.basis.dvol
-    abs_magn = sum(abs, spin_density(info.ρ)) * info.basis.dvol
+    if info.basis isa PlaneWaveBasis
+        magn = sum(spin_density(info.ρ)) * info.basis.dvol
+        abs_magn = sum(abs, spin_density(info.ρ)) * info.basis.dvol
+    elseif info.basis isa FiniteElementBasis
+        constraint_matrix = get_constraint_matrix(info.basis, :ρ)
+        magn = integrate(real(constraint_matrix * spin_density_FEM(info.ρout)), get_overlap_matrix(info.basis, :ρ))
+        abs_magn = integrate(real(constraint_matrix * abs.(spin_density_FEM(info.ρout))), get_overlap_matrix(info.basis, :ρ))
+    end
 
     tstr = cb.show_time ? " "^9 : ""
     if show_time

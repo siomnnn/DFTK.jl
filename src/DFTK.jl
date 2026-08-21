@@ -84,6 +84,11 @@ export irfft
 export ifft!
 export fft
 export fft!
+export kgrid_from_maximal_spacing, kgrid_from_minimal_n_kpoints
+export FiniteElementBasis
+export construct_FEM_grid
+export load_grid_from_file
+export FEMDiscretization
 export KgridTotalNumber, KgridSpacing
 include("Smearing.jl")
 include("Model.jl")
@@ -92,6 +97,9 @@ include("bzmesh.jl")
 include("fft.jl")
 include("Kpoint.jl")
 include("PlaneWaveBasis.jl")
+include("nfft.jl")
+include("FEMDiscretization.jl")
+include("FiniteElementBasis.jl")
 include("orbitals.jl")
 include("memory_usage.jl")
 include("input_output.jl")

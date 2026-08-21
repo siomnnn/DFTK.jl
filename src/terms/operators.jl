@@ -211,12 +211,30 @@ end
 
 # Optimize RFOs by combining terms that can be combined
 function optimize_operators(ops)
-    ops = [op for op in ops if !(op isa NoopOperator)]
+    ops = [op for op in ops if !(op isa NoopOperator || op isa NoopFEMOperator)]
     RSmults = [op for op in ops if op isa RealSpaceMultiplication]
-    isempty(RSmults) && return ops
-    nonRSmults = [op for op in ops if !(op isa RealSpaceMultiplication)]
+    RSFEMmults = [op for op in ops if op isa FEMRealSpaceMultiplication]
+    isempty(RSmults) && isempty(RSFEMmults) && return ops
+
+    nonRSmults = [op for op in ops if !(op isa RealSpaceMultiplication) && !(op isa FEMRealSpaceMultiplication)]
+
+    if isempty(RSFEMmults)
+        combined_RSmults = RealSpaceMultiplication(RSmults[1].basis,
+                                               RSmults[1].kpoint,
+                                               sum([op.potential for op in RSmults]))
+        return [nonRSmults..., combined_RSmults]
+    end
+    if isempty(RSmults)
+        combined_RSFEMmults = FEMRealSpaceMultiplication(RSFEMmults[1].basis,
+                                                         RSFEMmults[1].kpoint,
+                                                         sum([op.potential for op in RSFEMmults]))
+        return [nonRSmults..., combined_RSFEMmults]
+    end
     combined_RSmults = RealSpaceMultiplication(RSmults[1].basis,
                                                RSmults[1].kpoint,
                                                sum([op.potential for op in RSmults]))
-    [nonRSmults..., combined_RSmults]
+    combined_RSFEMmults = FEMRealSpaceMultiplication(RSFEMmults[1].basis,
+                                                     RSFEMmults[1].kpoint,
+                                                     sum([op.potential for op in RSFEMmults]))
+    [nonRSmults..., combined_RSmults, combined_RSFEMmults]
 end

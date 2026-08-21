@@ -9,7 +9,9 @@ Base.@kwdef struct Kinetic{F}
     blowup::F = BlowupIdentity()  # Blow-up to smooth energy bands.
 end
 
-(kin::Kinetic)(basis) = TermKinetic(basis, kin.scaling_factor, kin.blowup)
+(kin::Kinetic)(basis::PlaneWaveBasis) = TermKinetic(basis, kin.scaling_factor, kin.blowup)
+(kin::Kinetic)(basis::FiniteElementBasis) = TermKineticFEM(basis, kin.scaling_factor, kin.blowup)
+
 function Base.show(io::IO, kin::Kinetic)
     bup = kin.blowup isa BlowupIdentity ? "" : ", blowup=$(kin.blowup)"
     fac = isone(kin.scaling_factor) ? "" : ", scaling_factor=$(kin.scaling_factor)"
@@ -37,6 +39,14 @@ function kinetic_energy(kin::Kinetic, Ecut, p)
     kinetic_energy(kin.blowup, kin.scaling_factor, Ecut, p)
 end
 
+struct TermKineticFEM <: Term
+    scaling_factor::Real
+end
+function TermKineticFEM(basis::FiniteElementBasis{T}, scaling_factor, blowup) where {T}
+    @assert blowup isa BlowupIdentity "FEM kinetic energy does not support blow-up functions yet"
+    TermKineticFEM(T(scaling_factor))
+end
+
 @timing "ene_ops: kinetic" function ene_ops(term::TermKinetic, basis::PlaneWaveBasis{T},
                                             ψ, occupation; kwargs...) where {T}
     ops = [FourierMultiplication(basis, kpoint, term.kinetic_energies[ik])
@@ -56,6 +66,26 @@ end
     (; E, ops)
 end
 
+@timing "ene_ops: FEM kinetic" function ene_ops(term::TermKineticFEM, basis::FiniteElementBasis{T},
+                                            ψ, occupation; kwargs...) where {T}
+    ops = [NegHalfLaplaceFEMOperator(basis, kpoint)
+           for kpoint in basis.kpoints]
+    if isnothing(ψ) || isnothing(occupation)
+        return (; E=T(Inf), ops)
+    end
+    occupation = [to_cpu(occk) for occk in occupation]
+
+    E = zero(T)
+    for (ik, ψk) in enumerate(ψ)
+        constraint_matrix = basis.overlap_ops[basis.kpoints[ik]].constraint_matrix
+        for (iband, ψnk) in enumerate(eachcol(ψk))
+            ψnk_per = constraint_matrix * ψnk
+            E += basis.kweights[ik] * occupation[ik][iband] * real(dot(ψnk_per, get_neg_half_laplace_matrix(basis, :ψ), ψnk_per))
+        end
+    end
+
+    (; E, ops)
+end
 
 """
 Default blow-up corresponding to the standard kinetic energies.

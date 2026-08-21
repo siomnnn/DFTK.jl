@@ -130,7 +130,39 @@ function compute_fermi_level(basis::AbstractBasis{T}, eigenvalues, ::FermiBisect
 
     εF
 end
+# Un-MPI-ified version for FEM again.
+# TODO: unify once MPI is implemented
+function compute_fermi_level(basis::FiniteElementBasis{T}, eigenvalues, ::FermiBisection;
+                             temperature, smearing, tol_n_elec) where {T}
+    if iszero(temperature) && !(basis isa FiniteElementBasis)
+        return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
+                                   temperature, smearing, tol_n_elec)
+    end
 
+    excess(εF) = excess_n_electrons(basis, eigenvalues, εF; smearing, temperature)
+
+    # Check if band gap is so large that a rough guess based on integer occupations is sufficient.
+    εFint = guess_fermi_level_intocc_(basis, eigenvalues)
+    excess_int = excess(εFint)
+    if abs(excess_int) < tol_n_elec / 10
+        return εFint
+    end
+
+    # Get rough bounds to bracket εF
+    if excess_int < 0
+        min_ε = εFint
+        max_ε = maximum(maximum, eigenvalues) + 1
+    else
+        min_ε = minimum(minimum, eigenvalues) - 1
+        max_ε = εFint
+    end
+
+    @assert excess(min_ε) < 0 < excess(max_ε)
+    εF = Roots.find_zero(excess, (min_ε, max_ε), Roots.Bisection(), atol=eps(T))
+    @assert abs(excess(εF)) ≤ tol_n_elec
+
+    εF
+end
 
 """
 Two-stage Fermi level finding algorithm starting from a Gaussian-smearing guess.
@@ -138,7 +170,7 @@ Two-stage Fermi level finding algorithm starting from a Gaussian-smearing guess.
 struct FermiTwoStage <: AbstractFermiAlgorithm end
 function compute_fermi_level(basis::AbstractBasis{T}, eigenvalues, ::FermiTwoStage;
                              temperature, smearing, tol_n_elec) where {T}
-    if iszero(temperature)
+    if iszero(temperature) && !(basis isa FiniteElementBasis)
         return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
                                    temperature, smearing, tol_n_elec)
     end
@@ -202,6 +234,28 @@ function guess_fermi_level_intocc_(basis::AbstractBasis, eigenvalues)
         minimum(εk[n_fill+1:end], init=typemax(HOMO))
     end
     LUMO = mpi_min(LUMO, basis.comm_kpts)
+
+    if LUMO == typemax(HOMO)
+        HOMO + 1  # Just to make sure the εF is a sane number and above HOMO
+    else
+        (HOMO + LUMO) / 2
+    end
+end
+# Un-MPI-ified version for FEM again.
+# TODO: unify once MPI is implemented
+function guess_fermi_level_intocc_(basis::FiniteElementBasis, eigenvalues)
+    filled_occ = filled_occupation(basis.model)
+    n_spin = basis.model.n_spin_components
+    n_fill = div(basis.model.n_electrons, n_spin * filled_occ, RoundUp)
+
+    # Highest occupied energy level
+    HOMO = maximum([εk[n_fill] for εk in eigenvalues])
+
+    # Lowest unoccupied energy level: not all k-points might have at least n_fill+1
+    # energy levels so we have to take care of that by specifying init to minimum
+    LUMO = minimum(eigenvalues) do εk
+        minimum(εk[n_fill+1:end], init=typemax(HOMO))
+    end
 
     if LUMO == typemax(HOMO)
         HOMO + 1  # Just to make sure the εF is a sane number and above HOMO

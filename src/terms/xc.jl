@@ -28,7 +28,7 @@ function Base.show(io::IO, xc::Xc)
     print(io, "Xc($fun$fac)")
 end
 
-function (xc::Xc)(basis::PlaneWaveBasis{T}) where {T}
+function (xc::Xc)(basis::AbstractBasis{T}) where {T}
     isempty(xc.functionals) && return TermNoop()
 
     # Charge density for non-linear core correction
@@ -158,6 +158,48 @@ function xc_potential_real(term::TermXc, basis::PlaneWaveBasis{T}, ψ, occupatio
     (; E, potential, Vτ)
 end
 
+function xc_potential_real(term::TermXc, basis::FiniteElementBasis{T}, ψ, occupation;
+                           ρ, τ=nothing) where {T}
+    @assert !isempty(term.functionals)
+
+    model    = basis.model
+    n_spin   = model.n_spin_components
+    potential_threshold = term.potential_threshold
+    @assert all(family(xc) in (:lda, :gga, :mgga, :mggal) for xc in term.functionals)
+
+    # Add the model core charge density (non-linear core correction)
+    if !isnothing(term.ρcore)
+        ρ = ρ + term.ρcore
+    end
+
+    if isnothing(τ) && needs_τ(term)
+        throw(ArgumentError("TermXc needs the kinetic energy density τ. Please pass a `τ` " *
+                            "keyword argument to your `Hamiltonian` or `energy_hamiltonian` call."))
+    end
+
+    # Take derivatives of the density, if needed.
+    max_ρ_derivs = maximum(max_required_derivative, term.functionals)
+    density = LibxcDensities(basis, max_ρ_derivs, ρ, τ)
+
+    # Evaluate terms and energy contribution
+    # If the XC functional is not supported for an architecture, terms is on the CPU
+    terms = potential_terms(term.functionals, density)
+    @assert haskey(terms, :Vρ) && haskey(terms, :e)
+    E = term.scaling_factor * sum([integrate(real(get_constraint_matrix(basis, :ρ) * es), get_overlap_matrix(basis, :ρ)) for es in eachrow(terms.e)])
+
+    potential = zero(ρ)
+    @views for s = 1:n_spin
+        Vρ = to_device(basis.architecture, reshape(terms.Vρ, n_spin, get_n_free_dofs(basis, :ρ)))
+
+        potential .+= Vρ[s, :]
+    end
+
+    # Note: We always have to do this, otherwise we get issues with AD wrt. scaling_factor
+    potential .*= term.scaling_factor
+
+    (; E, potential, nothing)
+end
+
 @views @timing "ene_ops: xc" function ene_ops(term::TermXc, basis::PlaneWaveBasis,
                                               ψ, occupation; ρ, τ=nothing, kwargs...)
     E, Vxc, Vτ = xc_potential_real(term, basis, ψ, occupation; ρ, τ)
@@ -173,6 +215,16 @@ end
     (; E, ops)
 end
 
+@views @timing "ene_ops: xc" function ene_ops(term::TermXc, basis::FiniteElementBasis{T},
+                                              ψ, occupation; ρ, τ=nothing,
+                                              kwargs...) where {T}
+    E, Vxc, Vτ = xc_potential_real(term, basis, ψ, occupation; ρ, τ)
+
+    isnothing(Vτ) || error("Exchange-correlation functionals requiring the kinetic energy density τ are not yet implemented for FEM bases.")
+    ops = [FEMRealSpaceMultiplication(basis, kpt, Vxc[:, kpt.spin])
+           for kpt in basis.kpoints]
+    (; E, ops)
+end
 @views @timing "energy: xc"  function energy(term::TermXc, basis::PlaneWaveBasis{T},
                                              ψ, occupation; ρ, τ=nothing, kwargs...) where {T}
     if isnothing(τ) && needs_τ(term)
@@ -349,6 +401,16 @@ struct LibxcDensities{T}
     τ_real    # Kinetic-energy density τ[iσ, ix, iy, iz]
 end
 
+struct LibxcDensitiesFEM
+    basis::FiniteElementBasis
+    max_derivative::Int
+    ρ_real    # density ρ[iσ, ix, iy, iz]
+    ∇ρ_real   # for GGA, density gradient ∇ρ[iσ, ix, iy, iz, iα]
+    σ_real    # for GGA, contracted density gradient σ[iσ, ix, iy, iz]
+    Δρ_real   # for (some) mGGA, Laplacian of the density Δρ[iσ, ix, iy, iz]
+    τ_real    # Kinetic-energy density τ[iσ, ix, iy, iz]
+end
+
 """
 Compute density in real space and its derivatives starting from ρ
 """
@@ -405,6 +467,21 @@ function LibxcDensities(basis::PlaneWaveBasis{T}, max_derivative::Integer, ρ, �
     # τ[x, y, z, σ] -> τ_Libxc[σ, x, y, z]
     τ_Libxc = isnothing(τ) ? nothing : permutedims(τ, (4, 1, 2, 3))
     LibxcDensities{T}(basis, max_derivative, ρ_real, ∇ρ_real, σ_real, Δρ_real, τ_Libxc)
+end
+
+function LibxcDensities(basis::FiniteElementBasis, max_derivative::Integer, ρ, τ)
+    model = basis.model
+    @assert max_derivative == 0             # this is stupid, but derivatives of finite element functions aren't well defined in the grid points. TODO: figure out how to do this
+
+    n_spin    = model.n_spin_components
+    σ_real    = nothing
+    ∇ρ_real   = nothing
+    Δρ_real   = nothing
+    τ_Libxc   = nothing
+
+    ρ_real = permutedims(ρ, (2, 1))
+
+    LibxcDensitiesFEM(basis, max_derivative, ρ_real, ∇ρ_real, σ_real, Δρ_real, τ_Libxc)
 end
 
 function _check_negative_bonding_indicator_α(densities::LibxcDensities{T};
@@ -566,6 +643,23 @@ function DftFunctionals.energy_density(xcs::Vector{Functional}, density::LibxcDe
     result
 end
 
+for fun in (:potential_terms, :kernel_terms)
+    @eval begin
+        function DftFunctionals.$fun(xc::Functional, density::LibxcDensitiesFEM)
+            $fun(xc, _matify(density.ρ_real), _matify(density.σ_real),
+                     _matify(density.τ_real), _matify(density.Δρ_real))
+        end
+
+        function DftFunctionals.$fun(xcs::Vector{Functional}, density::LibxcDensitiesFEM)
+            isempty(xcs) && return NamedTuple()
+            result = $fun(xcs[1], density)
+            for i = 2:length(xcs)
+                result = mergesum(result, $fun(xcs[i], density))
+            end
+            result
+        end
+    end
+end
 
 """
 Compute divergence of an operand function, which returns the Cartesian x,y,z

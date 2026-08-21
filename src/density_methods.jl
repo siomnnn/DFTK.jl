@@ -11,7 +11,7 @@ struct ValenceDensityPseudo     <: AtomicDensity end
 struct ValenceDensityAuto       <: AtomicDensity end
 
 # Random density method
-function guess_density(basis::PlaneWaveBasis, ::RandomDensity;
+function guess_density(basis::AbstractBasis, ::RandomDensity;
                        n_electrons=basis.model.n_electrons)
     random_density(basis, n_electrons)
 end
@@ -30,14 +30,25 @@ function random_density(basis::PlaneWaveBasis{T}, n_electrons::Integer) where {T
     ρ = ρ_from_total_and_spin(ρtot, ρspin)
     mpi_bcast!(ρ, basis.comm_kpts)  # Enforce numerically identical density across MPI ranks
 end
+function random_density(basis::FiniteElementBasis{T}, n_electrons::Integer) where {T}
+    n_dofs = get_n_free_dofs(basis, :ρ)
+    ρtot  = rand(T, n_dofs)
+    ρtot  = ρtot .* n_electrons ./ integrate(real(get_constraint_matrix(basis, :ρ) * ρtot), get_overlap_matrix(basis, :ρ))     # Integration to n_electrons
+    ρspin = nothing
+    if basis.model.n_spin_components > 1
+        ρspin = rand((-1, 1), n_dofs) .* rand(T, n_dofs) .* ρtot
+        @assert all(abs.(ρspin) .≤ ρtot)
+    end
+    ρ_from_total_and_spin_FEM(ρtot, ρspin)
+end
 
 # Atomic density methods
-function guess_density(basis::PlaneWaveBasis, magnetic_moments=[],
+function guess_density(basis::AbstractBasis, magnetic_moments=[],
                        n_electrons=basis.model.n_electrons)
     atomic_density(basis, ValenceDensityAuto(), magnetic_moments, n_electrons)
 end
 
-function guess_density(basis::PlaneWaveBasis, system::AbstractSystem,
+function guess_density(basis::AbstractBasis, system::AbstractSystem,
                        n_electrons=basis.model.n_electrons)
     # Using no pseudopotentials is ok, only magnetic moments are read from the system here.
     pseudopotentials = fill(nothing, length(system))
@@ -79,7 +90,7 @@ that does not have valence charge density data.
 When magnetic moments are provided, construct a symmetry-broken density guess.
 The magnetic moments should be specified in units of ``μ_B``.
 """
-function guess_density(basis::PlaneWaveBasis, method::AtomicDensity, magnetic_moments=[];
+function guess_density(basis::AbstractBasis, method::AtomicDensity, magnetic_moments=[];
                        n_electrons=basis.model.n_electrons)
     atomic_density(basis, method, magnetic_moments, n_electrons)
 end
@@ -112,17 +123,30 @@ function atomic_density(basis::PlaneWaveBasis, method::AtomicDensity, magnetic_m
     end
     ρ
 end
+function atomic_density(basis::FiniteElementBasis, method::AtomicDensity, magnetic_moments,
+                        n_electrons)
+    ρtot = atomic_total_density(basis, method)
+    ρspin = atomic_spin_density(basis, method, magnetic_moments)
+    ρ = ρ_from_total_and_spin_FEM(ρtot, ρspin)
+
+    N = real(sum(integrate(get_constraint_matrix(basis, :ρ) * ρi, get_overlap_matrix(basis, :ρ)) for ρi in eachcol(ρ)))
+
+    if !isnothing(n_electrons) && (N > 0)
+        ρ .*= n_electrons / N  # Renormalize to the correct number of electrons
+    end
+    ρ
+end
 
 # Build a total charge density without spin information from a superposition of atomic
 # densities.
-function atomic_total_density(basis::PlaneWaveBasis{T}, method::AtomicDensity;
+function atomic_total_density(basis::AbstractBasis{T}, method::AtomicDensity;
                               coefficients=ones(T, length(basis.model.atoms))) where {T}
     atomic_density_superposition(basis, method; coefficients)
 end
 
 # Build a spin density from a superposition of atomic densities and provided magnetic
 # moments (with units ``μ_B``).
-function atomic_spin_density(basis::PlaneWaveBasis{T}, method::AtomicDensity,
+function atomic_spin_density(basis::AbstractBasis{T}, method::AtomicDensity,
                              magnetic_moments) where {T}
     model = basis.model
     if model.spin_polarization in (:none, :spinless)
@@ -179,11 +203,37 @@ function atomic_density_superposition(basis::PlaneWaveBasis{T},
     irfft(basis, reshape(ρ, basis.fft_size))
 end
 
+function atomic_density_superposition(basis::FiniteElementBasis{T},
+                                      method::AtomicDensity;
+                                      coefficients=ones(T, length(basis.model.atoms))
+                                      ) where {T}
+    form_factors, iG2ifnorm = atomic_density_form_factors(basis, method)
+
+    # Pre-allocation of large arrays for GPU efficiency
+    Gs = G_vectors(basis)
+    ρ = to_device(basis.architecture, zeros(Complex{T}, length(Gs)))
+    ρ_tmp = similar(ρ)
+    indices = to_device(basis.architecture, collect(1:length(Gs)))
+
+    for (igroup, group) in enumerate(basis.model.atom_groups)
+        for iatom in group
+            r = basis.model.positions[iatom]
+            ff_group = @view form_factors[:, igroup]
+            map!(iG -> cis2pi(-dot(Gs[iG], r)) * ff_group[iG2ifnorm[iG]], ρ_tmp, indices)
+            ρ .+= ρ_tmp .* (coefficients[iatom] / sqrt(basis.model.unit_cell_volume))
+        end
+    end
+
+    enforce_real!(ρ, basis)  # Symmetrize Fourier coeffs to have real iFFT
+    rnfft2(basis, reshape(ρ, basis.nfft_size))
+end
+
 """
 Returns the form factors at unique values of |G + q| (in Cartesian coordinates).
 Additionally, returns a mapping from any G index to the corresponding entry in the form_factors array.
 """
-function atomic_density_form_factors(basis::PlaneWaveBasis{T}, method::AtomicDensity) where {T<:Real}
+function atomic_density_form_factors(basis::AbstractBasis{T},
+                                     method::AtomicDensity ) where {T<:Real}
     G_cart = to_cpu(G_vectors_cart(basis))
 
     iG2ifnorm_cpu = zeros(Int, length(G_cart))

@@ -56,6 +56,44 @@ using an optional `occupation_threshold`. By default all occupation numbers are 
     ρ
 end
 
+@views @timing function compute_density(basis::FiniteElementBasis{T,VT}, ψ, occupation;
+                                        occupation_threshold=zero(T)) where {T,VT}
+
+    Tρ = promote_type(T, real(eltype(ψ[1])))
+    Tψ = promote_type(VT, real(eltype(ψ[1])))
+
+    occupation = [to_cpu(oc) for oc in occupation]
+    mask_occ = [findall(occnk -> abs(occnk) ≥ occupation_threshold, occk)
+                for occk in occupation]
+
+    function allocate_local_storage()
+        (; ρ=zeros(Tρ, get_n_free_dofs(basis, :ρ), basis.model.n_spin_components),
+         ψnk_fine=zeros(complex(Tψ), get_n_free_dofs(basis, :ρ)), ψnk_constraints=zeros(complex(Tψ), get_n_dofs(basis, :ρ)))
+    end
+    # We split the total iteration range (ik, n) in chunks, and parallelize over them.
+    range = [(ik, n) for ik = 1:length(basis.kpoints) for n = mask_occ[ik]]
+
+    storages = parallel_loop_over_range(range; allocate_local_storage) do kn, storage
+        (ik, n) = kn
+        kpt = basis.kpoints[ik]
+        mul!(storage.ψnk_fine, get_refinement_matrix(basis),  ψ[ik][:, n])
+        mul!(storage.ψnk_constraints, get_constraint_matrix(basis, kpt, :ρ), storage.ψnk_fine)
+        storage.ρ[:, kpt.spin] .+= (occupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_fine) ./ integrate(abs2.(storage.ψnk_constraints), get_overlap_matrix(basis, :ρ)))
+
+        synchronize_device(basis.architecture)
+    end
+    ρ = sum(getfield.(storages, :ρ))
+
+    # TODO: MPI
+
+    # There can always be small negative densities, e.g. due to numerical fluctuations
+    # in a vacuum region, so put some tolerance even if occupation_threshold == 0
+    negtol = max(sqrt(eps(T)), 10occupation_threshold)
+    minimum(ρ) < -negtol && @warn("Negative ρ detected", min_ρ=minimum(ρ))
+
+    ρ
+end
+
 # Variation in density corresponding to a variation in the orbitals and occupations.
 @views @timing function compute_δρ(basis::PlaneWaveBasis{T}, ψ, δψ, occupation,
                                    δoccupation=zero.(occupation);
@@ -147,11 +185,19 @@ end
 
 
 total_density(ρ) = dropdims(sum(ρ; dims=4); dims=4)
+total_density_FEM(ρ) = dropdims(sum(ρ; dims=2); dims=2)
 @views function spin_density(ρ)
     if size(ρ, 4) == 2
         ρ[:, :, :, 1] - ρ[:, :, :, 2]
     else
         zero(ρ[:, :, :])
+    end
+end
+@views function spin_density_FEM(ρ)
+    if size(ρ, 2) == 2
+        ρ[:, 1] - ρ[:, 2]
+    else
+        zero(ρ[:])
     end
 end
 
@@ -165,7 +211,7 @@ function ρ_from_total_and_spin(ρtot, ρspin=nothing)
     end
 end
 
-function ρ_from_total(basis, ρtot::AbstractArray{T}) where {T}
+function ρ_from_total(basis::PlaneWaveBasis{T}, ρtot::AbstractArray{T}) where {T}
     if basis.model.spin_polarization in (:none, :spinless)
         ρspin = nothing
     else
@@ -174,6 +220,24 @@ function ρ_from_total(basis, ρtot::AbstractArray{T}) where {T}
     ρ_from_total_and_spin(ρtot, ρspin)
 end
 
+function ρ_from_total_and_spin_FEM(ρtot, ρspin=nothing)
+    if ρspin === nothing
+        # Val used to ensure inferability
+        cat(ρtot; dims=Val(2))  # copy for consistency with other case
+    else
+        cat((ρtot .+ ρspin) ./ 2,
+            (ρtot .- ρspin) ./ 2; dims=Val(2))
+    end
+end
+
+function ρ_from_total(basis::FiniteElementBasis{T}, ρtot::AbstractVector{T}) where {T}
+    if basis.model.spin_polarization in (:none, :spinless)
+        ρspin = nothing
+    else
+        ρspin = zeros(T, length(ρtot))
+    end
+    ρ_from_total_and_spin_FEM(ρtot, ρspin)
+end
 #
 # Generalised density representation
 #
