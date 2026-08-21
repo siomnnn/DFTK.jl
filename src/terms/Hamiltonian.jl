@@ -35,7 +35,7 @@ struct DftHamiltonianBlock{Tbasis<:PlaneWaveBasis,
                            Tkpoint<:Kpoint,
                            Tlocal<:RealSpaceMultiplication,
                            TdivAgrad<:Union{Nothing,DivAgradOperator},
-                           Tscratch} <: HamiltonianBlock
+                           Tscratch} <: HamiltonianBlock{Tbasis}
     basis::Tbasis
     kpoint::Tkpoint
     operators::Vector
