@@ -1,4 +1,3 @@
-using LinearMaps
 using KrylovKit: OrthonormalBasis, Orthogonalizer
 using LinearAlgebra: Givens
 
@@ -12,8 +11,7 @@ define a method for this function to provide faster approximate versions for `A*
 mul_approximate(A, X; rtol=0.0) = (; Ax=A * X, info=(; rtol))
 
 function default_gmres_print(info)
-    !mpi_master() && return info  # Rest is printing => only do on master
-
+    # Default callback prints on all MPI ranks
     n_iter = info.n_iter
     if info.stage == :iterate
         if n_iter == 1
@@ -97,9 +95,14 @@ Parameters specific to inexact GMRES:
             w .= b .- Ax
             ldiv!(r, precon, w)  # Apply preconditioner
         end
-        y[1] = β = norm(r)
+        y[1] = β = residual_norm = norm(r)
 
-        while (n_iter < maxiter && k < m)  # Arnoldi loop
+        # Prevent iterations when the initial guess or the restarted guess are already sufficiently
+        # accurate. We check residual_norm < 2/3 tol since ||b-Ax|| < ||b-Ãx|| + ||Ax-Ãx||,
+        # where Ã is the inexact operator used in mul_approximate, which is accurate to tol/3.
+        converged = residual_norm < 2tol/3
+
+        while (!converged && n_iter < maxiter && k < m)  # Arnoldi loop
             n_iter += 1
 
             # Push new Krylov vector
@@ -124,15 +127,20 @@ Parameters specific to inexact GMRES:
             # Update right-hand side in Krylov subspace and new residual norm estimate
             y[k + 1] = zero(T)
             lmul!(Gs[k], y)
-            resid_history[n_iter] = abs(y[k + 1])
+            resid_history[n_iter] = residual_norm = abs(y[k + 1])
 
             info = (; y, V, H, R, resid_history=resid_history[1:n_iter], converged, n_iter,
-                     residual_norm=resid_history[n_iter], maxiter, tol, s, residual=r,
+                     residual_norm, maxiter, tol, s,
                      restart_history, stage=:iterate, krylovdim, k, Axinfos)
             callback(info)
             Axinfos = []
 
-            if resid_history[n_iter] < tol
+            # Note: Although in [^Herbst2025] we have tol / 3 in the following convergence check,
+            # our numerical tests still find that the requested tolerance is approximately
+            # achieved when dropping the /3. This prevents the GMRES from potential over-iterating
+            # when the `mul_approximate` calls happen to yield higher-accurate answers compared to
+            # what has been requested.
+            if residual_norm < tol
                 # If the guess for s happens to over-estimate the σ(H_m) than we need to
                 # restart, so convergence is only reached if this condition is true ...
                 min_svdval_H = minimum(svdvals(H[1:(k+1), 1:k]))
@@ -149,7 +157,7 @@ Parameters specific to inexact GMRES:
 
         if converged || n_iter ≥ maxiter
             info = (; x, resid_history=resid_history[1:n_iter], converged, n_iter,
-                     residual_norm=resid_history[n_iter], maxiter, tol, s, residual=r,
+                     residual_norm, maxiter, tol, s,
                      restart_history, stage=:finalize, krylovdim, y, V, H, R)
             callback(info)
             return info

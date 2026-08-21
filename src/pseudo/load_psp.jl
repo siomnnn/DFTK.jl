@@ -1,8 +1,8 @@
-"""Return the data directory with pseudopotential files"""
-datadir_psp() = normpath(joinpath(@__DIR__, "..", "..", "data", "psp"))
-
-# See also: DFTKPseudoPotentialDataExt
 extra_pseudometa_kwargs(::AbstractDict, ::Symbol) = NamedTuple()
+function extra_pseudometa_kwargs(family::PseudoFamily, element::Symbol)
+    meta = pseudometa(family, element)
+    haskey(meta, "rcut") ? (; rcut=meta["rcut"]) : NamedTuple()
+end
 
 """
 Load a pseudopotential file from a pseudopotential family.
@@ -62,46 +62,33 @@ end
 
 """
 Load a pseudopotential file. The file extension is used to determine
-the type of the pseudopotential file format and a respective class
-(e.g. `PspHgh` or `PspUpf`) is returned. Most users will want to use
-other methods of the `load_psp` function.
+the type of the pseudopotential file format and a corresponding class is returned.
+The following formats are supported:
+- Goedecker-Teter-Hutter (.gth / .hgh files), yielding a `PspHgh`;
+- Unified Pseudopotential Format (.upf files), yielding a `PspUpf`;
+- Abinit pseudopotential format 8 (.psp8 files), yielding a `PspUpf`.
+
+Most users will want to use other methods of the `load_psp` function.
 """
-function load_psp(key::AbstractString; kwargs...)
-    if endswith(lowercase(key), ".gth")
-        pseudo_type = PspHgh
-        extension = ".gth"
-    elseif endswith(lowercase(key), ".upf")
-        pseudo_type = PspUpf
-        extension = ".upf"
-    elseif startswith(lowercase(key), "hgh/") || endswith(lowercase(key), ".hgh")
-        # TODO Legacy block still needed for GTH pseudos bundled with DFTK
-        pseudo_type = PspHgh
-        extension = ".hgh"
-    else
-        error("Could not determine pseudopotential family of '$key'")
+function load_psp(fullpath::AbstractString; kwargs...)
+    if !isfile(fullpath) 
+        error("Could not find pseudopotential file '$fullpath'. Note: The DFTK-bundled" *
+              "pseudopotentials (keys 'hgh/pbe/c-q4' and similar) have been removed in" *
+              "DFTK 0.8.1. Please use PseudoPotentialData to select pseudopotentials." *
+              "See the DFTK tutorial and documentation for details.")
     end
 
-    Sys.iswindows() && (key = replace(key, "/" => "\\"))
-    if isfile(key)  # Key is a file ... deduce identifier
-        fullpath = key
-        identifier = replace(key, "\\" => "/")
-    else  # Not a file: treat as identifier, add extension if needed
-        @warn("Calling `load_psp` without specifying a full path to a pseudopotential file " *
-              "(i.e. identifiers such as hgh/lda/Si-q4) are deprecated as DFTK's internal " *
-              "pseudopotential library will be removed in the future. Please use the " *
-              "PseudoPotentialData package to supply pseudopotentials to DFTK. (e.g. here " *
-              "`load_psp(PseudoFamily(\"cp2k.nc.sr.lda.v0_1.semicore.gth\"), :Si)`)")
-        fullpath = joinpath(datadir_psp(), lowercase(key))
-        isfile(fullpath) || (fullpath = fullpath * extension)
-        identifier = replace(lowercase(key), "\\" => "/")
-    end
+    # TODO: We keep this identifier in the form it was introduced during a time
+    #       DFTK had still a built-in pseudopotential library.
+    identifier = Sys.iswindows() ? replace(fullpath, "/" => "\\") : fullpath
 
-    if isfile(fullpath)
-        return pseudo_type(fullpath; identifier, kwargs...)
+    fullpath_lc = lowercase(fullpath)
+    if endswith(fullpath_lc, ".gth")
+        return PspHgh(fullpath; identifier, kwargs...)
+    elseif endswith(fullpath_lc, ".upf") || endswith(fullpath_lc, ".psp8")
+        # PspUpf has a constructor that will convert from a Psp8File to a UpfFile
+        return PspUpf(fullpath; identifier, kwargs...)
     else
-        error("Could not find pseudopotential file '$key'")
+        error("Could not determine pseudopotential family of '$fullpath'")
     end
 end
-
-@deprecate(load_psp(dir::AbstractString, filename::AbstractString; kwargs...),
-           load_psp(joinpath(dir, filename); kwargs...))

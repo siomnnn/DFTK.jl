@@ -7,6 +7,13 @@ using AtomsBase
 # Very likely `species`, and `charge_ionic` need to be defined as well.
 abstract type Element end
 
+"""Return the local potential for a passed coordinate or vector of coordinates in frequency space"""
+function local_potential_fourier end
+
+"""Return the local potential for a passed coordinate or vector of coordinates in real space"""
+function local_potential_real end
+
+
 """Return the chemical species corresponding to an element"""
 AtomsBase.species(::Element) = ChemicalSpecies(0)  # dummy atom
 
@@ -28,27 +35,28 @@ n_elec_valence(el::Element) = charge_ionic(el)
 """Return the number of core electrons"""
 n_elec_core(el::Element) = charge_nuclear(el) - charge_ionic(el)
 
-"""Check presence of model core charge density (non-linear core correction)."""
-has_core_density(::Element) = false
+"""Return the pseudopotential family for the element if this is known, else `nothing`"""
+pseudofamily(::Element) = nothing
+
 # The preceding functions are fallback implementations that should be altered as needed.
 
+eval_psp_energy_correction(T, ::Element) = zero(T)
+eval_psp_energy_correction(el::Element) = eval_psp_energy_correction(Float64, el)
+
 # Fall back to the Gaussian table for Elements without pseudopotentials
-function valence_charge_density_fourier(el::Element, p::T)::T where {T <: Real}
-    gaussian_valence_charge_density_fourier(el, p)
+
+# Vector to single-argument fallbacks in the Elements
+for fn in [:local_potential_fourier, :local_potential_real]
+    @eval begin
+        function DFTK.$fn(el::Element, arg::AbstractVector{<:Real})
+            arch = architecture(arg)
+            to_device(arch, map(p -> $fn(el, p), to_cpu(arg)))
+        end
+    end
 end
 
-"""Gaussian valence charge density using Abinit's coefficient table, in Fourier space."""
-function gaussian_valence_charge_density_fourier(el::Element, p::T)::T where {T <: Real}
-    charge_ionic(el) * exp(-(p * atom_decay_length(el))^2)
-end
 
-function core_charge_density_fourier(::Element, ::T)::T where {T <: Real}
-    error("Abstract elements do not necesesarily provide core charge density.")
-end
-
-# Fallback print function:
-Base.show(io::IO, el::Element) = print(io, "$(typeof(el))($(species(el)))")
-
+Base.show(io::IO, el::Element) = print(io, "$(typeof(el))(:$(species(el)))")
 
 #
 # ElementCoulomb
@@ -75,10 +83,11 @@ end
 function local_potential_fourier(el::ElementCoulomb, p::T) where {T <: Real}
     p == 0 && return zero(T)  # Compensating charge background
     # General atom => Use default Coulomb potential
-    # We use int_{R^3} -Z/r e^{-i p⋅x} = -4π Z / |p|^2
+    # We use ∫_ℝ³ -Z/r exp(-ix⋅p) = -4π Z / |p|^2
     Z = charge_nuclear(el)
     return -4T(π) * Z / p^2
 end
+
 local_potential_real(el::ElementCoulomb, r::Real) = -charge_nuclear(el) / r
 
 
@@ -88,12 +97,24 @@ local_potential_real(el::ElementCoulomb, r::Real) = -charge_nuclear(el) / r
 struct ElementPsp{P} <: Element
     species::ChemicalSpecies
     psp::P  # Pseudopotential data structure
+    family::Union{PseudoFamily,Nothing}  # PseudoFamily if known, else Nothing
     mass    # Atomic mass
 end
-function Base.show(io::IO, el::ElementPsp)
-    pspid = isempty(el.psp.identifier) ? "custom" : el.psp.identifier
-    print(io, "ElementPsp($(el.species), \"$pspid\")")
+function Base.show(io::IO, el::ElementPsp{P}) where {P}
+    print(io, "ElementPsp(:$(el.species), ")
+    if !isnothing(el.family)
+        print(io, el.family)
+    elseif isempty(el.psp.identifier)
+        print(io, "custom psp")
+    else
+        print(io, "\"$(el.psp.identifier)\"")
+    end
+    if P <: PspLinComb
+        print(io, ", ", el.psp.description)
+    end
+    print(io, ")")
 end
+pseudofamily(el::ElementPsp) = el.family
 
 """
 Element interacting with electrons via a pseudopotential model.
@@ -123,41 +144,29 @@ ElementPsp(:Si, PseudoFamily("dojo.nc.sr.pbe.v0_4_1.standard.upf"))
 function ElementPsp(species::ChemicalSpecies, family::AbstractDict;
                     mass=AtomsBase.mass(species), kwargs...)
     psp = load_psp(family, element_symbol(species); kwargs...)
-    ElementPsp(species, psp, mass)
+    pseudofamily = family isa PseudoFamily ? family : nothing
+    ElementPsp(species, psp, pseudofamily,  mass)
 end
-function ElementPsp(species::ChemicalSpecies, psp; mass=AtomsBase.mass(species))
-    ElementPsp(species, psp, mass)
+function ElementPsp(species::ChemicalSpecies, psp, family=nothing; mass=AtomsBase.mass(species))
+    ElementPsp(species, psp, family, mass)
 end
-function ElementPsp(species::ChemicalSpecies, psp::Nothing; kwargs...)
+function ElementPsp(species::ChemicalSpecies, psp::Nothing, family=nothing; kwargs...)
     ElementCoulomb(species; kwargs...)
 end
 function ElementPsp(key::Union{Integer,Symbol}, psp; kwargs...)
     ElementPsp(ChemicalSpecies(key), psp; kwargs...)
 end
-@deprecate ElementPsp(key; psp, kwargs...) ElementPsp(key, psp; kwargs...)
 
 AtomsBase.mass(el::ElementPsp)    = el.mass
 AtomsBase.species(el::ElementPsp) = el.species
 charge_ionic(el::ElementPsp)      = charge_ionic(el.psp)
-has_core_density(el::ElementPsp)  = has_core_density(el.psp)
+eval_psp_energy_correction(T, el::ElementPsp) = eval_psp_energy_correction(T, el.psp)
 
-function local_potential_fourier(el::ElementPsp, p::T) where {T <: Real}
-    p == 0 && return zero(T)  # Compensating charge background
-    eval_psp_local_fourier(el.psp, p)
-end
+# Function forwarding for ElementPsp (for each case both versions are needed to resolve ambiguities)
+local_potential_fourier(el::ElementPsp, p::Real) = eval_psp_local_fourier(el.psp, p)
+local_potential_fourier(el::ElementPsp, p::AbstractVector{<:Real}) = eval_psp_local_fourier(el.psp, p)
 local_potential_real(el::ElementPsp, r::Real) = eval_psp_local_real(el.psp, r)
-
-function valence_charge_density_fourier(el::ElementPsp, p::T) where {T <: Real}
-    if has_valence_density(el.psp)
-        eval_psp_density_valence_fourier(el.psp, p)
-    else
-        gaussian_valence_charge_density_fourier(el, p)
-    end
-end
-function core_charge_density_fourier(el::ElementPsp, p::T) where {T <: Real}
-    eval_psp_density_core_fourier(el.psp, p)
-end
-
+local_potential_real(el::ElementPsp, r::AbstractVector{<:Real}) = eval_psp_local_real(el.psp, r)
 
 #
 # ElementCohenBergstresser
@@ -225,7 +234,7 @@ function local_potential_fourier(el::ElementCohenBergstresser, p::T) where {T <:
     psq_pi = Int(round(p^2 / (2π / el.lattice_constant)^2, digits=2))
     T(get(el.V_sym, psq_pi, 0.0))
 end
-
+# TODO Strictly speaking needs a eval_psp_energy_correction
 
 #
 # ElementGaussian
@@ -251,9 +260,90 @@ function ElementGaussian(α, L; symbol=:X, mass=nothing)
     T = promote_type(typeof(α), typeof(L))
     ElementGaussian{T}(α, L, symbol, mass)
 end
-function local_potential_real(el::ElementGaussian, r)
+function local_potential_real(el::ElementGaussian, r::Real)
     -el.α / (√(2π) * el.L) * exp(- (r / el.L)^2 / 2)
 end
 function local_potential_fourier(el::ElementGaussian, p::Real)
     -el.α * exp(- (p * el.L)^2 / 2)  # = ∫_ℝ³ V(x) exp(-ix⋅p) dx
+end
+# TODO Strictly speaking needs a eval_psp_energy_correction
+
+#
+# Helper functions
+#
+
+"""
+    virtual_crystal_approximation(coefficients::Vector{<:Number}, elements::Vector{<:ElementPsp};
+                                  species=ChemicalSpecies(0))
+
+Build a virtual crystal approximation in form of a convex combination of the physics
+(local, non-local potentials, masses) of the `elements`. The passed `coefficients` are
+expected to sum to one. The result is returned as a [`ElementPsp`](@ref) with a
+`DFTK.PspLinComb` pseudopotential. By default the `species` of the returned element
+is set to `ChemicalSpecies(0)`, which can be changed using the respective keyword argument.
+"""
+function virtual_crystal_approximation(coefficients::Vector{<:Number},
+                                       elements::Vector{<:ElementPsp{<:NormConservingPsp}};
+                                       species=ChemicalSpecies(0))
+    length(coefficients) == length(elements) || throw(
+        ArgumentError("Expect coefficients and elements to have equal length."))
+    sum(coefficients) ≈ one(eltype(coefficients)) || throw(
+        ArgumentError("Expect coefficients to sum to 1"))
+    family = allequal(p -> p.family, elements) ? first(elements).family : nothing
+
+    pseudopotentials = [el.psp for el in elements]
+    symbols = [el.species for el in elements]
+    lincomb_psp = virtual_crystal_approximation(coefficients, pseudopotentials; symbols)
+    lincomb_mass = sum(c * mass(el) for (c, el) in zip(coefficients, elements))
+    ElementPsp(species, lincomb_psp, family, lincomb_mass)
+end
+
+"""
+    virtual_crystal_approximation(coefficients::Vector{<:Number},
+                                  pseudopotentials::Vector{<:NormConservingPsp};
+                                  symbols=nothing)
+
+Build a virtual crystal approximation pseudopotential from a list of `coefficients`
+and a list of `pseudopotentials`; returns a `DFTK.PspLinComb` object.
+The `symbols` keyword argument can be used to pass the symbols of the elements,
+which are linearly combined. This is only used to make up a descriptive human-redable
+string for printing.
+"""
+function virtual_crystal_approximation(coefficients::Vector{<:Number},
+                                       pseudopotentials::Vector{<:NormConservingPsp};
+                                       symbols::Union{Nothing,<:AbstractVector}=nothing)
+    length(coefficients) == length(pseudopotentials) || throw(
+        ArgumentError("Expect coefficients and pseudopotentials to have equal length."))
+    if isnothing(symbols)
+        description = "lin. comb. psp"
+    else
+        length(coefficients) == length(symbols) || throw(
+            ArgumentError("Expect coefficients and symbols to have equal length."))
+        description = "lin. comb. of "
+        description *= join([(@sprintf "%.2f*%s" c "$spec")
+                             for (c, spec) in zip(coefficients, symbols)], " ")
+    end
+    PspLinComb(coefficients, pseudopotentials; description)
+end
+
+"""
+    virtual_crystal_approximation(coeff_α, element_α, coeff_β, element_β;
+                                  species=ChemicalSpecies(0))
+
+Signature, whichis provided for convenience for the use case of mixing two elements / pseudopotentials.
+
+## Examples
+Form a 10% germanium in 90% tin virtual element
+```julia
+using PseudoPotentialData
+pseudopotentials = PseudoFamily("dojo.nc.sr.pbe.v0_4_1.standard.upf")
+Ge = ElementPsp(:Ge, pseudopotentials)
+Sn = ElementPsp(:Sn, pseudopotentials)
+
+X = virtual_crystal_approximation(0.1, Ge, 0.9, Sn)
+```
+"""
+function virtual_crystal_approximation(coeff_α::Number, element_α,
+                                       coeff_β::Number, element_β; kwargs...)
+    virtual_crystal_approximation([coeff_α, coeff_β], [element_α, element_β]; kwargs...)
 end

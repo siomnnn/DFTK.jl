@@ -8,9 +8,8 @@
     Ecut = 5
 
     model  = model_DFT(silicon.lattice, silicon.atoms, silicon.positions; functionals=LDA())
-    kgrid  = [2, 2, 2]
-    kshift = [1, 1, 1] / 2
-    basis  = PlaneWaveBasis(model; Ecut, kgrid, kshift)
+    kgrid  = MonkhorstPack([2, 2, 2]; kshift=[1, 1, 1] / 2)
+    basis  = PlaneWaveBasis(model; Ecut, kgrid)
 
     ψ = self_consistent_field(basis; tol, callback=identity).ψ
 
@@ -18,7 +17,7 @@
 
     # Transfer to bigger basis then same basis (both interpolations are
     # tested then)
-    bigger_basis = PlaneWaveBasis(model; Ecut=(Ecut + 5), kgrid, kshift)
+    bigger_basis = PlaneWaveBasis(model; Ecut=(Ecut + 5), kgrid)
     ψ_b  = transfer_blochwave(ψ, basis, bigger_basis)
     ψ_bb = transfer_blochwave(ψ_b, bigger_basis, basis)
     @test norm(ψ - ψ_bb) < eps(eltype(basis))
@@ -37,7 +36,7 @@
     @test all(M -> M ≈ M*M, TTᵇ)
 
     # Transfer between same basis (not very useful, but is worth testing)
-    bigger_basis = PlaneWaveBasis(model; Ecut, kgrid, kshift)
+    bigger_basis = PlaneWaveBasis(model; Ecut, kgrid)
     ψ_b = transfer_blochwave(ψ, basis, bigger_basis)
     ψ_bb = transfer_blochwave(ψ_b, bigger_basis, basis)
     @test norm(ψ-ψ_bb) < eps(eltype(basis))
@@ -54,16 +53,13 @@ end
 
     # Test grids that have both even and odd sizes.
     @testset "Small -> big -> small is identity" begin
-        basis      = PlaneWaveBasis(model; Ecut, kgrid, fft_size=(15, 30,  1))
+        basis      = PlaneWaveBasis(model; Ecut, kgrid, fft_size=(15, 31,  1))
         basis_big  = PlaneWaveBasis(model; Ecut, kgrid, fft_size=(20, 33, 11))
 
-        # A random density on an even-sized grid has a Fourier component G, where its
-        # counterpart -G is *not* part of the FFT grid, therefore ifft(fft(ρ)) would
-        # not be an identity. To prevent this we use enforce_real! to explicitly set
-        # the non-matched Fourier component to zero.
+        # The small grid is odd on purpose: on an even grid a random density has a Fourier
+        # component G whose counterpart -G is not on the grid, and that one is not recovered
+        # by the round trip (which is what the next testset checks).
         ρ = random_density(basis, 1)
-        ρ_fourier_purified = DFTK.enforce_real!(fft(basis, ρ), basis)
-        ρ = irfft(basis, ρ_fourier_purified)
 
         ρ_b  = transfer_density(ρ,   basis,     basis_big)
         ρ_bb = transfer_density(ρ_b, basis_big, basis    )

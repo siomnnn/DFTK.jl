@@ -23,6 +23,13 @@ basis = PlaneWaveBasis(model; Ecut=5, kgrid=[3, 3, 3]);
 # DFTK already defines a few callback functions for standard
 # tasks. One example is the usual convergence table,
 # which is defined in the callback [`ScfDefaultCallback`](@ref).
+# It has a few options to customize printing. For example an estimate
+# of the total memory consumption on host (main RAM) and an eventual
+# GPU device is printed if one uses the callback
+
+callback = ScfDefaultCallback(show_memory=true)
+scfres = self_consistent_field(basis; tol=1e-3, callback);
+
 # Another example is [`ScfSaveCheckpoints`](@ref), which stores the state
 # of an SCF at each iterations to allow resuming from a failed
 # calculation at a later point.
@@ -45,7 +52,7 @@ density_differences = Float64[];
 # The callback function itself gets passed a named tuple
 # similar to the one returned by `self_consistent_field`,
 # which contains the input and output density of the SCF step
-# as `ρin` and `ρout`. Since the callback gets called
+# as `ρin` and `ρ`. Since the callback gets called
 # both during the SCF iterations as well as after convergence
 # just before `self_consistent_field` finishes we can both
 # collect the data and initiate the plotting in one function.
@@ -54,9 +61,9 @@ using LinearAlgebra
 
 function plot_callback(info)
     if info.stage == :finalize
-        plot!(p, density_differences, label="|ρout - ρin|", markershape=:x)
+        plot!(p, density_differences, label="|ρ - ρin|", markershape=:x)
     else
-        push!(density_differences, norm(info.ρout - info.ρin))
+        push!(density_differences, norm(info.ρ - info.ρin))
     end
     info
 end

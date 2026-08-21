@@ -30,6 +30,11 @@ end
 function compute_occupation(basis::AbstractBasis{T}, eigenvalues::AbstractVector, εF::Number;
                             temperature=basis.model.temperature,
                             smearing=basis.model.smearing) where {T}
+    # Check that eigenvalues are increasing monotonically, for contiguous occupations
+    if !all(all(diff(εk) .≥ -eps(T)) for εk in eigenvalues)
+        error("Eigenvalues should be monotonically increasing.")
+    end
+
     # This is needed to get the right behaviour for special floating-point types
     # such as intervals.
     inverse_temperature = iszero(temperature) ? T(Inf) : 1/temperature
@@ -69,23 +74,30 @@ function compute_occupation(basis::AbstractBasis{T}, eigenvalues::AbstractVector
         end
 
         if abs(excess) > tol_n_elec
-            @warn("Large deviation of electron count in compute_occupation. (excess=$excess). " *
-                  "This may lead to an unphysical solution. Try decreasing the temperature " *
-                  "or using a different smearing function.")
+            if mpi_master(basis.comm_kpts)
+                @warn("Large deviation of electron count in compute_occupation. (excess=$excess). " *
+                      "This may lead to an unphysical solution. Try decreasing the temperature " *
+                      "or using a different smearing function.")
+            end
+            debugdump_fermialg(basis, eigenvalues, fermialg;
+                               temperature, smearing, εF, excess, dexcess)
         end
         if dexcess < -sqrt(eps(T))
-            @warn("Negative density of states (electron count versus Fermi level derivative) " *
-                  "encountered in compute_occupation. This may lead to an unphysical " *
-                  "solution. Try decreasing the temperature or using a different smearing " *
-                  "function.")
+            if mpi_master(basis.comm_kpts)
+                @warn("Negative density of states (electron count versus Fermi level derivative) " *
+                      "encountered in compute_occupation. This may lead to an unphysical " *
+                      "solution. Try decreasing the temperature or using a different smearing " *
+                      "function.")
+            end
+            debugdump_fermialg(basis, eigenvalues, fermialg;
+                               temperature, smearing, εF, excess, dexcess)
         end
     end
     compute_occupation(basis, eigenvalues, εF; temperature, smearing)
 end
 
-
 struct FermiBisection <: AbstractFermiAlgorithm end
-function compute_fermi_level(basis::PlaneWaveBasis{T}, eigenvalues, ::FermiBisection;
+function compute_fermi_level(basis::AbstractBasis{T}, eigenvalues, ::FermiBisection;
                              temperature, smearing, tol_n_elec) where {T}
     if iszero(temperature)
         return compute_fermi_level(basis, eigenvalues, FermiZeroTemperature();
@@ -207,7 +219,7 @@ Note, that while this function can be used in cases with spin or with temperatur
 is no guarantee that the Fermi-level estimated by this function *is* the actual Fermi level.
 Therefore this function should generally only be used as a starting point for other routines.
 """
-function guess_fermi_level_intocc_(basis::PlaneWaveBasis, eigenvalues)
+function guess_fermi_level_intocc_(basis::AbstractBasis, eigenvalues)
     filled_occ = filled_occupation(basis.model)
     n_spin = basis.model.n_spin_components
     n_fill = div(basis.model.n_electrons, n_spin * filled_occ, RoundUp)
@@ -252,6 +264,22 @@ function guess_fermi_level_intocc_(basis::FiniteElementBasis, eigenvalues)
     end
 end
 
+"""Debug dumping for Fermi algorithms."""
+function debugdump_fermialg(basis, eigenvalues, fermialg;
+                            temperature, smearing, εF, excess, dexcess,
+                            prefix=debugdump_prefix())
+    if !isempty(prefix)  # Empty prefix means no debug dumping enabled.
+        data = band_data_to_dict((; basis, eigenvalues, εF))
+        data["temperature"] = temperature
+        data["smearing"]    = string(smearing)
+        data["fermialg"]    = string(fermialg)
+        data["excess"]      = excess
+        data["dexcess"]     = dexcess
+        save_debugdump(basis.comm_kpts, "fermialg", data; prefix)
+    end
+end
+
+
 """
 Check that all orbitals are fully occupied.
 """
@@ -260,4 +288,16 @@ function check_full_occupation(basis::AbstractBasis, occupation)
     for occ_k in occupation
         all(occ_k .== filled_occ) || error("Only full occupation is supported, but $occ_k has partial occupation.")
     end
+end
+
+"""
+Return ranges of occupied elements based on a given occupation threshold
+"""
+function occupied_empty_masks(occupation, occupation_threshold)
+    n_occ = map(occupation) do occ
+        something(findlast(x -> abs(x) > occupation_threshold, occ), 0)
+    end
+    mask_occ  = [1:n_occ[ik] for ik in 1:length(occupation)]
+    mask_empty = [(n_occ[ik] + 1):length(occupation[ik]) for ik in 1:length(occupation)]
+    (; mask_occ, mask_empty)
 end

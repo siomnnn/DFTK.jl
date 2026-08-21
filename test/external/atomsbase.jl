@@ -4,6 +4,7 @@
     using UnitfulAtomic
     using AtomsBase
     using PseudoPotentialData
+    using DFTK: pseudofamily
 
     family = PseudoFamily("dojo.nc.sr.pbe.v0_4_1.standard.upf")
     Si = ElementCoulomb(:Si)
@@ -57,6 +58,7 @@
         @test model.atoms[2].psp.identifier == replace(family[:C],  "\\" => "/")
         @test model.atoms[3].psp.identifier == replace(family[:H],  "\\" => "/")
         @test model.atoms[4].psp.identifier == replace(family[:C],  "\\" => "/")
+        @test pseudofamily(model) == family
     end
 
     @testset "system -> Model -> system" begin
@@ -120,6 +122,7 @@ end
 
 @testitem "AbstractSystem -> DFTK Model" tags=[:atomsbase] begin
     using DFTK
+    using DFTK: pseudofamily
     using Unitful
     using UnitfulAtomic
     using AtomsBase
@@ -142,6 +145,7 @@ end
         @test model.atoms[2] == ElementCoulomb(:Si)
         @test model.atoms[3] == ElementCoulomb(:H)
         @test model.atoms[4] == ElementCoulomb(:C)
+        @test isnothing(pseudofamily(model))
     end
 
     pbegth = PseudoFamily("dojo.nc.sr.pbe.v0_4_1.standard.upf")
@@ -157,6 +161,7 @@ end
         @test model.atoms[2].psp.identifier == replace(pspmap[:Si], "\\" => "/")
         @test model.atoms[3].psp.identifier == replace(pspmap[:H],  "\\" => "/")
         @test model.atoms[4].psp.identifier == replace(pspmap[:C],  "\\" => "/")
+        @test isnothing(pseudofamily(model))
     end
 
     let
@@ -175,6 +180,7 @@ end
         @test model.atoms[2] == ElementPsp(:Si, psp_Si)
         @test model.atoms[3] == ElementPsp(:H,  psp_H)
         @test model.atoms[4] == ElementPsp(:C,  psp_C)
+        @test isnothing(pseudofamily(model))
     end
 
     let family = PseudoFamily("dojo.nc.sr.pbe.v0_4_1.standard.upf")
@@ -191,11 +197,13 @@ end
         @test model.atoms[2].psp.identifier == replace(family[:Si], "\\" => "/")
         @test model.atoms[3].psp.identifier == replace(family[:H],  "\\" => "/")
         @test model.atoms[4].psp.identifier == replace(family[:C],  "\\" => "/")
+        @test pseudofamily(model) == family
     end
 end
 
 @testitem "AbstractSystem (unusual symbols and masses) -> DFTK" tags=[:atomsbase] begin
     using DFTK
+    using DFTK: pseudofamily
     using Unitful
     using UnitfulAtomic
     using AtomsBase
@@ -220,5 +228,59 @@ end
         @test mass.(model.atoms) == [-1u"u", -2u"u"]
         @test model.atoms[1].psp.identifier == replace(gth[:C], "\\" => "/")
         @test model.atoms[2].psp.identifier == replace(gth[:C], "\\" => "/")
+        @test isnothing(pseudofamily(model))
     end
+end
+
+@testitem "parse_system with Dual positions and/or lattice" tags=[:atomsbase] begin
+    using AtomsBase
+    using ForwardDiff
+    using Unitful
+    using UnitfulAtomic
+    using DFTK
+    using PseudoPotentialData
+
+    pos1 = [0.0, 0.0, 0.0]
+    pos2 = [1.35, 1.35, 1.35]
+    cell = [[5.4, 0.0, 0.0], [0.0, 5.4, 0.0], [0.0, 0.0, 5.4]]
+    psp = PseudoFamily("dojo.nc.sr.pbe.v0_4_1.standard.upf")
+
+    # Float64 positions, Float64 lattice
+    system_ff = periodic_system(
+        [:Si => pos1 .* u"bohr", :Si => pos2 .* u"bohr"],
+        cell .* u"bohr",
+    )
+    parsed_ff = @test_nowarn DFTK.parse_system(system_ff, psp)
+    @test eltype(parsed_ff.lattice) === Float64
+    @test eltype(eltype(parsed_ff.positions)) === Float64
+
+    # Dual positions, Float64 lattice
+    pos1_dual = ForwardDiff.Dual.(pos1, (1.0, 0.0, 0.0))
+    pos2_dual = ForwardDiff.Dual.(pos2, (0.0, 1.0, 0.0))
+    system_df = periodic_system(
+        [:Si => pos1_dual .* u"bohr", :Si => pos2_dual .* u"bohr"],
+        cell .* u"bohr",
+    )
+    parsed_df = @test_nowarn DFTK.parse_system(system_df, psp)
+    @test eltype(parsed_df.lattice) <: ForwardDiff.Dual
+    @test eltype(eltype(parsed_df.positions)) <: ForwardDiff.Dual
+
+    # Float64 positions, Dual lattice
+    cell_dual = [ForwardDiff.Dual.(c, (1.0, 0.0, 0.0)) for c in cell]
+    system_fd = periodic_system(
+        [:Si => pos1 .* u"bohr", :Si => pos2 .* u"bohr"],
+        cell_dual .* u"bohr",
+    )
+    parsed_fd = @test_nowarn DFTK.parse_system(system_fd, psp)
+    @test eltype(parsed_fd.lattice) <: ForwardDiff.Dual
+    @test eltype(eltype(parsed_fd.positions)) <: ForwardDiff.Dual
+
+    # Dual positions, Dual lattice
+    system_dd = periodic_system(
+        [:Si => pos1_dual .* u"bohr", :Si => pos2_dual .* u"bohr"],
+        cell_dual .* u"bohr",
+    )
+    parsed_dd = @test_nowarn DFTK.parse_system(system_dd, psp)
+    @test eltype(parsed_dd.lattice) <: ForwardDiff.Dual
+    @test eltype(eltype(parsed_dd.positions)) <: ForwardDiff.Dual
 end

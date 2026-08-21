@@ -17,6 +17,11 @@ include("fem_operators.jl")
 # In particular, dE/dψn = 2 fn |Hψn> (plus weighting for k-point sampling)
 abstract type Term end
 
+# Terms that are linear in the density matrix, i.e. have zero second derivative
+abstract type TermLinear <: Term end
+compute_kernel(term::TermLinear, basis::AbstractBasis; kwargs...) = nothing
+apply_kernel(term::TermLinear, basis::AbstractBasis, δρ; kwargs...) = nothing
+
 # Terms that are non-linear in the density (i.e. which give rise to a Hamiltonian
 # contribution that is density-dependent or orbital-dependent as well)
 abstract type TermNonlinear <: Term end
@@ -34,7 +39,7 @@ DftFunctionals.needs_τ(t::Term) = false
 """
 A term with a constant zero energy.
 """
-struct TermNoop <: Term end
+struct TermNoop <: TermLinear end
 function ene_ops(term::TermNoop, basis::PlaneWaveBasis{T}, ψ, occupation; kwargs...) where {T}
     (; E=zero(eltype(T)), ops=[NoopOperator(basis, kpt) for kpt in basis.kpoints])
 end
@@ -50,9 +55,16 @@ include("Hamiltonian.jl")
 # is invalid)
 breaks_symmetries(::Any) = false
 
+# breaks_time_reversal_symmetry on a term builder answers true if this term breaks
+# time-reversal symmetry. Phonon computations rely implicitly on TRS
+# to avoid solving Sternheimer equations at both +q and -q (cf.
+# discussion in JuliaMolSim/DFTK.jl#1310).
+breaks_time_reversal_symmetry(::Any) = false
+
 include("kinetic.jl")
 
 include("local.jl")
+breaks_symmetries(::ExternalFromValues) = true
 breaks_symmetries(::ExternalFromReal) = true
 breaks_symmetries(::ExternalFromFourier) = true
 
@@ -64,12 +76,16 @@ include("ewald.jl")
 include("psp_correction.jl")
 include("entropy.jl")
 include("pairwise.jl")
+include("hubbard.jl")
+include("exact_exchange.jl")
 
 include("magnetic.jl")
 breaks_symmetries(::Magnetic) = true
+breaks_time_reversal_symmetry(::Magnetic) = true
 
 include("anyonic.jl")
 breaks_symmetries(::Anyonic) = true
+breaks_time_reversal_symmetry(::Anyonic) = true
 
 # forces computes either nothing or an array forces[at][α] (by default no forces)
 compute_forces(::Term, ::AbstractBasis, ψ, occupation; kwargs...) = nothing
@@ -106,7 +122,6 @@ In this case the matrix has effectively 4 blocks
     end
     kernel
 end
-compute_kernel(::Term, ::AbstractBasis{T}; kwargs...) where {T} = nothing  # By default no kernel
 
 
 """
@@ -133,4 +148,3 @@ as a 4D `(i,j,k,σ)` array.
     end
     δV
 end
-apply_kernel(::Term, ::AbstractBasis{T}, δρ; kwargs...) where {T} = nothing  # by default, no kernel

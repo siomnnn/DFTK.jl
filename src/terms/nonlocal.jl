@@ -12,19 +12,19 @@ function (::AtomicNonlocal)(basis::PlaneWaveBasis{T}) where {T}
     # keep only pseudopotential atoms and positions
     psp_groups = [group for group in model.atom_groups
                   if model.atoms[first(group)] isa ElementPsp]
-    psps          = [model.atoms[first(group)].psp      for group in psp_groups]
+    psps          = [model.atoms[first(group)].psp for group in psp_groups]
     psp_positions = [model.positions[group] for group in psp_groups]
 
     isempty(psp_groups) && return TermNoop()
     ops = map(basis.kpoints) do kpt
         P = build_projection_vectors(basis, kpt, psps, psp_positions)
-        D = build_projection_coefficients(T, psps, psp_positions)
-        NonlocalOperator(basis, kpt, P, to_device(basis.architecture, D))
+        D = build_projection_coefficients(basis, psps, psp_positions)
+        NonlocalOperator(basis, kpt, P, D)
     end
     TermAtomicNonlocal(ops)
 end
 
-struct TermAtomicNonlocal <: Term
+struct TermAtomicNonlocal <: TermLinear
     ops::Vector{NonlocalOperator}
 end
 
@@ -105,14 +105,13 @@ end
     for group in psp_groups
         element = model.atoms[first(group)]
 
-        C = to_device(basis.architecture, build_projection_coefficients(T, element.psp))
+        D = to_device(basis.architecture, build_projection_coefficients(T, element.psp))
+
         for (ik, kpt) in enumerate(basis.kpoints)
             # We compute the forces from the irreductible BZ; they are symmetrized later.
-            G_plus_k_cart = to_cpu(Gplusk_vectors_cart(basis, kpt))
+            G_plus_k_cart = Gplusk_vectors_cart(basis, kpt)
             G_plus_k = Gplusk_vectors(basis, kpt)
-            occupationk = to_cpu(occupation[ik])
-            form_factors = to_device(basis.architecture,
-                                     build_projector_form_factors(element.psp, G_plus_k_cart))
+            form_factors = build_projector_form_factors(element.psp, G_plus_k_cart)
 
             # Pre-allocation of large arrays (Noticable performance improvements on
             # CPU and GPU here)
@@ -130,10 +129,8 @@ end
                 forces[idx] += map(1:3) do α
                     map!(p -> -2π*im*p[α], twoπp, G_plus_k)
                     dPdR .= twoπp .* P
-                    mul!(δHψk, P, C * (dPdR' * ψ[ik]))
-                    @views -sum(occupationk[iband] * basis.kweights[ik] *
-                                2real(dot(ψ[ik][:, iband], δHψk[:, iband]))
-                            for iband=1:size(ψ[ik], 2))
+                    mul!(δHψk, P, D * (dPdR' * ψ[ik]))
+                    -basis.kweights[ik]*sum(occupation[ik] .* 2vec(real(columnwise_dots(ψ[ik], δHψk))))
                 end  # α
             end  # r
         end  # kpt
@@ -148,7 +145,7 @@ end
 # The ordering of the projector indices is (A,l,m,i), where A is running over all
 # atoms, l, m are AM quantum numbers and i is running over all projectors for a
 # given l. The matrix is block-diagonal with non-zeros only if A, l and m agree.
-function build_projection_coefficients(T, psps, psp_positions)
+function build_projection_coefficients(basis::PlaneWaveBasis{T}, psps, psp_positions) where {T}
     # TODO In the current version the proj_coeffs still has a lot of zeros.
     #      One could improve this by storing the blocks as a list or in a
     #      BlockDiagonal data structure
@@ -164,7 +161,7 @@ function build_projection_coefficients(T, psps, psp_positions)
     end
     @assert count == n_proj
 
-    proj_coeffs
+    to_device(basis.architecture, proj_coeffs)
 end
 
 # Builds the projection coefficient matrix for a single atom
@@ -213,8 +210,8 @@ function build_projection_vectors(basis::PlaneWaveBasis{T}, kpt::Kpoint,
     unit_cell_volume = basis.model.unit_cell_volume
     n_proj = count_n_proj(psps, psp_positions)
     n_G    = length(G_vectors(basis, kpt))
-    proj_vectors = zeros(Complex{eltype(psp_positions[1][1])}, n_G, n_proj)
-    G_plus_k = to_cpu(Gplusk_vectors(basis, kpt))
+    G_plus_k = Gplusk_vectors(basis, kpt)
+    proj_vectors = zeros_like(G_plus_k, Complex{eltype(psp_positions[1][1])}, n_G, n_proj)
 
     # Compute the columns of proj_vectors = 1/√Ω \hat proj_i(k+G)
     # Since the proj_i are translates of each others, \hat proj_i(k+G) decouples as
@@ -223,7 +220,7 @@ function build_projection_vectors(basis::PlaneWaveBasis{T}, kpt::Kpoint,
     offset = 0  # offset into proj_vectors
     for (psp, positions) in zip(psps, psp_positions)
         # Compute position-independent form factors
-        G_plus_k_cart = to_cpu(Gplusk_vectors_cart(basis, kpt))
+        G_plus_k_cart = Gplusk_vectors_cart(basis, kpt)
         form_factors = build_projector_form_factors(psp, G_plus_k_cart)
 
         # Combine with structure factors
@@ -239,35 +236,58 @@ function build_projection_vectors(basis::PlaneWaveBasis{T}, kpt::Kpoint,
     end
     @assert offset == n_proj
 
-    # Offload potential values to a device (like a GPU)
-    to_device(basis.architecture, proj_vectors)
+    proj_vectors
 end
 
 """
 Build form factors (Fourier transforms of projectors) for all orbitals of an atom centered at 0.
+This is a highly optimized, GPU compatible function.
 """
 function build_projector_form_factors(psp::NormConservingPsp,
-                                      G_plus_k::AbstractVector{Vec3{TT}}) where {TT}
-    G_plus_ks = [G_plus_k]
+                                      G_plus_k::AbstractVector{Vec3{T}}) where {T}
+    Gpk = to_cpu(G_plus_k)
+    arch = architecture(G_plus_k)
+
+    iG2ifnorm_cpu = zeros(Int, length(Gpk))
+    norm_indices = IdDict{T, Int}()
+    for (iG, G) in enumerate(Gpk)
+        p = norm(G)
+        iG2ifnorm_cpu[iG] = get!(norm_indices, p, length(norm_indices) + 1)
+    end
+    iG2ifnorm = to_device(arch, iG2ifnorm_cpu)
+
+    ni_pairs = collect(pairs(norm_indices))
+    ps = to_device(arch, first.(ni_pairs))
+    p_indices = to_device(arch, last.(ni_pairs))
 
     n_proj = count_n_proj(psp)
-    form_factors = zeros(Complex{TT}, length(G_plus_k), n_proj)
+    form_factors = similar(G_plus_k, Complex{T}, length(G_plus_k), n_proj)
+    G_indices = to_device(arch, collect(1:length(G_plus_k)))
+    proj_li = similar(G_indices, Complex{T}, length(G_indices))
     for l = 0:psp.lmax, 
         n_proj_l = count_n_proj_radial(psp, l)
         offset = sum(x -> count_n_proj(psp, x), 0:l-1; init=0) .+ 
                  n_proj_l .* (collect(1:2l+1) .- 1) # offset about m for a given l 
         for i = 1:n_proj_l
-            proj_li(p) = eval_psp_projector_fourier(psp, i, l, p)
-            form_factors_li = build_form_factors(proj_li, l, G_plus_ks)
-            @views form_factors[:, offset.+i] = form_factors_li[1]
+            # Performs same computation as build_form_factors(eval_psp_projector_fourier, l, [G_plus_k]),
+            # but in a highly optimized, vectorized, and GPU compatible way. Also saves on allocations,
+            # and many recomputations of unique |G+k|.
+            proj_li[p_indices] .= eval_psp_projector_fourier(psp, i, l, ps)
+            for m = -l:l
+                map!(@view(form_factors[:, offset[m + l + 1] + i]), G_indices) do iG
+                    angular = (-im)^l * solid_harmonic_real(l, m, G_plus_k[iG])
+                    proj_li[iG2ifnorm[iG]] * angular
+                end
+            end
         end
     end
-
     form_factors
 end
 
 """
 Build Fourier transform factors of an atomic function centered at 0 for a given l.
+The function should return a Hankel transform or equivalent,
+with a division by p^l already included.
 """
 function build_form_factors(fun::Function, l::Int,
                             G_plus_ks::AbstractVector{<:AbstractVector{Vec3{TT}}}) where {TT}
@@ -295,7 +315,7 @@ function build_form_factors(fun::Function, l::Int,
             radials_p = radials[norm(p)]
             for m = -l:l
                 # see "Fourier transforms of centered functions" in the docs for the formula
-                angular = (-im)^l * ylm_real(l, m, p)
+                angular = (-im)^l * solid_harmonic_real(l, m, p)
                 form_factors_ik[ip, m+l+1] = radials_p * angular
             end
         end
@@ -354,7 +374,7 @@ end
 function build_projection_coefficients(basis::PlaneWaveBasis{T}, psp_groups) where {T}
     psps          = [basis.model.atoms[first(group)].psp for group in psp_groups]
     psp_positions = [basis.model.positions[group] for group in psp_groups]
-    build_projection_coefficients(T, psps, psp_positions)
+    build_projection_coefficients(basis, psps, psp_positions)
 end
 function build_projection_vectors(basis::PlaneWaveBasis, kpt::Kpoint,
                                   psp_groups::AbstractVector{<: AbstractVector{<: Int}},
@@ -396,11 +416,8 @@ function compute_dynmat_δH(::TermAtomicNonlocal, basis::PlaneWaveBasis{T}, ψ, 
                     δHψk_plus_q = derivative_wrt_αs(model.positions, α, idx) do positions_αs
                         PDPψk(basis, positions_αs, psp_groups, kpt, kpt, ψ[ik])
                     end
-                    -sum(  2occupation[ik][iband] * basis.kweights[ik]
-                               * dot(δψk_plus_q[:, iband], δHψk[:, iband])
-                         + δoccupation[ik][iband]  * basis.kweights[ik]
-                               * 2real(dot(ψk[:, iband], δHψk_plus_q[:, iband]))
-                         for iband=1:size(ψk, 2))
+                    -basis.kweights[ik] * sum(2occupation[ik] .* vec(columnwise_dots(δψk_plus_q, δHψk)) +
+                                              δoccupation[ik] .* 2vec(real(columnwise_dots(ψk, δHψk_plus_q))))
                 end
             end
         end
@@ -443,9 +460,8 @@ end
                     PDPψk(basis, positions_βsαs, psp_groups, kpt, kpt, ψ[ik])
                 end
             end
-            dynmat_δ²H[β, s, α, s] += sum(occupation[ik][n] * basis.kweights[ik] *
-                                              dot(ψ[ik][:, n], δ²Hψ[ik][:, n])
-                                          for n=1:size(ψ[ik], 2))
+            dynmat_δ²H[β, s, α, s] += basis.kweights[ik] *
+                sum(occupation[ik] .* columnwise_dots(ψ[ik], δ²Hψ[ik]))
         end
     end
 

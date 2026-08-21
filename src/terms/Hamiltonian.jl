@@ -30,20 +30,23 @@ struct GenericHamiltonianBlockFEM{B <: FiniteElementBasis} <: HamiltonianBlock{B
 
     scratch  # dummy field
 end
-
-# More optimized HamiltonianBlock for the important case of a DFT Hamiltonian
-struct DftHamiltonianBlock{B <: PlaneWaveBasis} <: HamiltonianBlock{B}
-    basis::B
-    kpoint::Kpoint
+"""A more optimized HamiltonianBlock for the important case of a DFT Hamiltonian."""
+struct DftHamiltonianBlock{Tbasis<:PlaneWaveBasis,
+                           Tkpoint<:Kpoint,
+                           Tlocal<:RealSpaceMultiplication,
+                           TdivAgrad<:Union{Nothing,DivAgradOperator},
+                           Tscratch} <: HamiltonianBlock
+    basis::Tbasis
+    kpoint::Tkpoint
     operators::Vector
 
     # Individual operators for easy access
     fourier_op::FourierMultiplication
-    local_op::RealSpaceMultiplication
+    local_op::Tlocal
     nonlocal_op::Union{Nothing,NonlocalOperator}
-    divAgrad_op::Union{Nothing,DivAgradOperator}
+    divAgrad_op::TdivAgrad
 
-    scratch  # Pre-allocated scratch arrays for fast application
+    scratch::Tscratch  # Pre-allocated scratch arrays for fast application
 end
 
 function HamiltonianBlock(basis::PlaneWaveBasis, kpoint, operators; scratch=nothing)
@@ -97,11 +100,9 @@ function random_orbitals(hamk::HamiltonianBlock, howmany::Integer)
     random_orbitals(hamk.basis, hamk.kpoint, howmany)
 end
 
-import Base: Matrix, Array
-Array(block::HamiltonianBlock)  = Matrix(block)
-Matrix(block::HamiltonianBlock) = sum(Matrix, block.operators)
-Matrix(block::GenericHamiltonianBlock) = sum(Matrix, block.optimized_operators)
-Matrix(block::GenericHamiltonianBlockFEM) = sum(Matrix, block.optimized_operators)
+Base.Array(block::HamiltonianBlock)  = Matrix(block)
+Base.Matrix(block::HamiltonianBlock) = sum(Matrix, block.operators)
+Base.Matrix(block::GenericHamiltonianBlock) = sum(Matrix, block.optimized_operators)
 
 struct Hamiltonian{B <: AbstractBasis}
     basis::B
@@ -129,20 +130,19 @@ end
                                                                         ψ::AbstractArray)
     function allocate_local_storage()
         T = eltype(H.basis)
-        (; Hψ_fourier = similar(Hψ[:, 1]),
+        (; Hψ_fourier = similar(Hψ, size(Hψ, 1)),
            ψ_real  = similar(ψ, complex(T), H.basis.fft_size...),
-           Hψ_real = similar(Hψ, complex(T), H.basis.fft_size...))
+           Hψ_real = similar(Hψ, complex(T), H.basis.fft_size...),
+           to = TimerOutput())
     end
-    parallel_loop_over_range(1:size(ψ, 2); allocate_local_storage) do iband, storage
-        to = TimerOutput()  # Thread-local timer output
-
+    storages = parallel_loop_over_range(1:size(ψ, 2); allocate_local_storage) do iband, storage
         # Take ψi, IFFT it to ψ_real, apply each term to Hψ_fourier and Hψ_real, and add it
         # to Hψ.
         storage.Hψ_real .= 0
         storage.Hψ_fourier .= 0
         ifft!(storage.ψ_real, H.basis, H.kpoint, ψ[:, iband])
         for op in H.optimized_operators
-            @timeit to "$(nameof(typeof(op)))" begin
+            @timeit storage.to "$(nameof(typeof(op)))" begin
                 apply!((; fourier=storage.Hψ_fourier, real=storage.Hψ_real),
                        op,
                        (; fourier=ψ[:, iband], real=storage.ψ_real))
@@ -151,11 +151,8 @@ end
         Hψ[:, iband] .= storage.Hψ_fourier
         fft!(storage.Hψ_fourier, H.basis, H.kpoint, storage.Hψ_real)
         Hψ[:, iband] .+= storage.Hψ_fourier
-
-        if Threads.threadid() == 1
-            merge!(DFTK.timer, to; tree_point=[t.name for t in DFTK.timer.timer_stack])
-        end
     end
+    merge!(DFTK.timer, first(storages).to; tree_point=[t.name for t in DFTK.timer.timer_stack])
 
     Hψ
 end
@@ -193,19 +190,30 @@ end
     n_bands = size(ψ, 2)
     iszero(n_bands) && return Hψ  # Nothing to do if ψ empty
     have_divAgrad = !isnothing(H.divAgrad_op)
+    if have_divAgrad
+        # TODO: It is very beneficial to precompute G_plus_k here, rather than for each band.
+        #       Extra performance could probably be gained by storing this in the HamiltonianBlock
+        #       as a scratch array. Is it worth the complication and extra memory use?
+        # Precompute G_plus_k for DivAgradOperator
+        G_plus_k = [map(p -> p[α], Gplusk_vectors_cart(H.basis, H.kpoint)) for α = 1:3]
+    end
 
     # Notice that we use unnormalized plans for extra speed
-    potential = H.local_op.potential / prod(H.basis.fft_size)
+    potential = H.local_op.potential .* H.basis.fft_grid.fft_normalization .*
+                H.basis.fft_grid.ifft_normalization
 
-    parallel_loop_over_range(1:n_bands, H.scratch) do iband, storage
-        to = TimerOutput()  # Thread-local timer output
-        ψ_real = storage.ψ_reals
+    # Give main timer to first thread and a dummy to the others
+    storages = map(enumerate(H.scratch)) do (i, scratch)
+        (scratch, i == 1 ? DFTK.timer : TimerOutput())
+    end
 
-        @timeit to "local+kinetic" begin
+    parallel_loop_over_range(1:n_bands, storages) do iband, (scratch, to)
+        ψ_real = scratch.ψ_reals
+
+        @timeit to "local" begin
             ifft!(ψ_real, H.basis, H.kpoint, ψ[:, iband]; normalize=false)
             ψ_real .*= potential
             fft!(Hψ[:, iband], H.basis, H.kpoint, ψ_real; normalize=false)  # overwrites ψ_real
-            Hψ[:, iband] .+= H.fourier_op.multiplier .* ψ[:, iband]
         end
 
         if have_divAgrad
@@ -213,16 +221,13 @@ end
                 apply!((; fourier=Hψ[:, iband], real=nothing),
                        H.divAgrad_op,
                        (; fourier=ψ[:, iband], real=nothing);
-                       ψ_scratch=ψ_real)
+                       ψ_real, G_plus_k) # overwrites ψ_real
             end
         end
-
-        if Threads.threadid() == 1
-            merge!(DFTK.timer, to; tree_point=[t.name for t in DFTK.timer.timer_stack])
-        end
-
-        synchronize_device(H.basis.architecture)
     end
+
+    # Kinetic term
+    Hψ .+= H.fourier_op.multiplier .* ψ
 
     # Apply the nonlocal operator.
     if !isnothing(H.nonlocal_op)
@@ -243,6 +248,8 @@ kwargs is additional info that might be useful for the energy terms to precomput
 (eg the density ρ)
 """
 @timing function energy_hamiltonian(basis::PlaneWaveBasis, ψ, occupation; kwargs...)
+    @assert isnothing(ψ) || length(ψ) == length(basis.kpoints)
+
     # it: index into terms, ik: index into kpoints
     @timing "ene_ops" ene_ops_arr = [ene_ops(term, basis, ψ, occupation; kwargs...)
                                      for term in basis.terms]

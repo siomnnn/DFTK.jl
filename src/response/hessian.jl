@@ -1,4 +1,5 @@
 using KrylovKit
+using LinearMaps
 
 # The Hessian of P -> E(P) (E being the energy) is Ω+K, where Ω and K are
 # defined below (cf. [1] for more details).
@@ -29,8 +30,12 @@ from ψ and Λ is the set of Rayleigh coefficients ψk' * Hk * ψk at each k-poi
 """
 @timing function apply_Ω(δψ, ψ, H::Hamiltonian, Λ)
     δψ = proj_tangent(δψ, ψ)
-    Ωδψ = [H.blocks[ik] * δψk - δψk * Λ[ik] for (ik, δψk) in enumerate(δψ)]
-    proj_tangent!(Ωδψ, ψ)
+    map(enumerate(δψ)) do (ik, δψk)
+        Ωδψ = H.blocks[ik] * δψk
+        mul!(Ωδψ, δψk, Λ[ik], -1, 1)
+        proj_tangent_kpt!(Ωδψ, ψ[ik])
+        Ωδψ
+    end
 end
 
 """
@@ -48,6 +53,8 @@ Compute the application of K defined at ψ to δψ. ρ is the density issued fro
     δψ = proj_tangent(δψ, ψ)
     δρ = compute_δρ(basis, ψ, δψ, occupation)
     δV = apply_kernel(basis, δρ; ρ)
+    # normalize here so we can use unnormalized FFTs for extra speed
+    δV .*= basis.fft_grid.ifft_normalization * basis.fft_grid.fft_normalization
 
     ψnk_real = similar(G_vectors(basis), promote_type(T, eltype(ψ[1])))
     Kδψ = map(enumerate(ψ)) do (ik, ψk)
@@ -55,9 +62,9 @@ Compute the application of K defined at ψ to δψ. ρ is the density issued fro
         δVψk = similar(ψk)
 
         for n = 1:size(ψk, 2)
-            ifft!(ψnk_real, basis, kpt, ψk[:, n])
+            ifft!(ψnk_real, basis, kpt, ψk[:, n]; normalize=false)
             ψnk_real .*= δV[:, :, :, kpt.spin]
-            fft!(δVψk[:, n], basis, kpt, ψnk_real)
+            fft!(δVψk[:, n], basis, kpt, ψnk_real; normalize=false)
         end
         δVψk
     end
@@ -76,7 +83,7 @@ function ResponseCallback()
     ResponseCallback(Ref(zero(UInt64)))
 end
 function (cb::ResponseCallback)(info)
-    mpi_master() || return info  # Only print on master
+    mpi_master(info.basis.comm_kpts) || return info  # Only print on master
 
     if info.stage == :finalize
         info.converged || @warn "solve_ΩplusK not converged."
@@ -94,7 +101,7 @@ function (cb::ResponseCallback)(info)
     runtime_ns = current_time - cb.prev_time[]
     cb.prev_time[] = current_time
 
-    resnorm = @sprintf "%20.2f" log10(info.residual_norm)
+    resnorm = @sprintf "%20.2f" log10(only(info.residual_norms))
     time = @sprintf "% 6s" TimerOutputs.prettytime(runtime_ns)
     @printf "% 3d   %s   %s\n" info.n_iter resnorm time
     flush(stdout)
@@ -103,9 +110,9 @@ end
 
 """
 Solve density-functional perturbation theory problem,
-that is return δψ where (Ω+K) δψ = rhs.
+that is return δψ where (Ω+K) δψ = -δHextψ.
 """
-@timing function solve_ΩplusK(basis::PlaneWaveBasis{T}, ψ, rhs, occupation;
+@timing function solve_ΩplusK(basis::PlaneWaveBasis{T}, ψ, δHextψ, occupation;
                               callback=ResponseCallback(), tol=1e-10) where {T}
     # for now, all orbitals have to be fully occupied -> need to strip them beforehand
     check_full_occupation(basis, occupation)
@@ -114,13 +121,14 @@ that is return δψ where (Ω+K) δψ = rhs.
     ρ = compute_density(basis, ψ, occupation)
     H = energy_hamiltonian(basis, ψ, occupation; ρ).ham
 
+    # K is not C-linear, so we work in R^2N instead of C^N via the pack/unpack routines
     pack(ψ) = reinterpret_real(pack_ψ(ψ))
     unpack(x) = unpack_ψ(reinterpret_complex(x), size.(ψ))
     unsafe_unpack(x) = unsafe_unpack_ψ(reinterpret_complex(x), size.(ψ))
 
-    # project rhs on the tangent space before starting
-    proj_tangent!(rhs, ψ)
-    rhs_pack = pack(rhs)
+    # project δHextψ on the tangent space before starting
+    proj_tangent!(δHextψ, ψ)
+    δHextψ_pack = pack(δHextψ)
 
     # preconditioner
     Pks = [PreconditionerTPA(basis, kpt) for kpt in basis.kpoints]
@@ -145,17 +153,25 @@ that is return δψ where (Ω+K) δψ = rhs.
         Ωδψ = apply_Ω(δψ, ψ, H, Λ)
         pack(Ωδψ + Kδψ)
     end
-    J = LinearMap{T}(ΩpK, size(rhs_pack, 1))
+    J = LinearMap{T}(ΩpK, size(δHextψ_pack, 1))
 
-    # solve (Ω+K) δψ = rhs on the tangent space with CG
-    function proj(x)
+    # solve (Ω+K) δψ = -δHextψ on the tangent space with CG
+    function proj!(Px, x)
         δψ = unpack(x)
         proj_tangent!(δψ, ψ)
-        pack(δψ)
+        Px .= pack(δψ)
     end
-    res = cg(J, rhs_pack; precon=FunctionPreconditioner(f_ldiv!), proj, tol,
-             callback, comm=basis.comm_kpts)
-    (; δψ=unpack(res.x), res.converged, res.tol, res.residual_norm,
+    # custom inner product that Ω+K is self-adjoint with respect to
+    function weighted_dots(x, y)
+        δψx = unsafe_unpack(x)
+        δψy = unsafe_unpack(y)
+        # real(dot) here because we work in R^2N rather than C^N
+        [weighted_ksum(basis, [real(dot(δψx[ik], δψy[ik])) for ik in 1:length(basis.kpoints)])]
+    end
+    res = cg(J, -δHextψ_pack; precon=FunctionPreconditioner(f_ldiv!), proj!,
+             tol=tol, callback=info -> callback(merge(info, (; basis=basis))),
+             my_columnwise_dots=weighted_dots)
+    (; δψ=unpack(res.x), res.converged, res.tol, res.residual_norms,
      res.n_iter)
 end
 
@@ -169,6 +185,10 @@ function OmegaPlusKDefaultCallback(; show_σmin=false, show_time=true)
 end
 function (cb::OmegaPlusKDefaultCallback)(info)
     io = stdout
+    # Default to MPI.COMM_WORLD for logging if basis not provided
+    comm = MPI.COMM_WORLD
+    haskey(info, :basis) && (comm = info.basis.comm_kpts)
+
     avgCG = 0.0
     if haskey(info, :Axinfos) && haskey(first(info.Axinfos), :n_iter)
         # Axinfo: NamedTuple returned by mul_inexact(::DielectricAdjoint, ...)
@@ -178,10 +198,10 @@ function (cb::OmegaPlusKDefaultCallback)(info)
         avgCG = sum(info.Axinfos) do Axinfo
             mean(sum, Axinfo.n_iter)
         end
-        avgCG = mpi_mean(avgCG, first(info.Axinfos).basis.comm_kpts)
+        avgCG = mpi_mean(avgCG, comm)
     end
 
-    !mpi_master() && return info  # Rest is printing => only do on master
+    !mpi_master(comm) && return info  # Rest is printing => only do on master
 
     show_time  = (hasproperty(info, :runtime_ns) && cb.show_time)
     label_time = show_time    ? ("  Δtime ", "  ------", " "^8) : ("", "", "")
@@ -215,14 +235,15 @@ function (cb::OmegaPlusKDefaultCallback)(info)
         @printf(io, "%21s%s  %10s  %7.1f%s  %s\n",
                 "", label_s[3], "", avgCG, tstr, "Final orbitals")
     end
+    flush(stdout)
     info
 end
 
 """
-Solve the problem `(Ω+K) δψ = rhs` (density-functional perturbation theory)
-using a split algorithm, where `rhs` is typically
-`-δHextψ` (the negative matvec of an external perturbation with the SCF orbitals `ψ`) and
-`δψ` is the corresponding total variation in the orbitals `ψ`. Additionally returns:
+Solve the problem `(Ω+K) δψ = -δHextψ` (density-functional perturbation theory)
+using a split algorithm, where
+`δψ` is the total variation in the orbitals `ψ` corresponding to the external perturbation δHext.
+Additionally returns:
     - `δρ`:  Total variation in density
     - `δHψ`: Total variation in Hamiltonian applied to orbitals
     - `δeigenvalues`: Total variation in eigenvalues
@@ -243,7 +264,8 @@ Input parameters:
    see [arxiv 2505.02319](https://arxiv.org/pdf/2505.02319) for more details.
 """
 @timing function solve_ΩplusK_split(ham::Hamiltonian, ρ::AbstractArray{T}, ψ, occupation, εF,
-                                    eigenvalues, rhs;
+                                    eigenvalues, δHextψ;
+                                    δtemperature=zero(real(T)),
                                     tol=1e-8, verbose=true,
                                     mixing=SimpleMixing(),
                                     occupation_threshold,
@@ -254,9 +276,8 @@ Input parameters:
                                     maxiter=100, krylovdim=20, s=100,
                                     callback=verbose ? OmegaPlusKDefaultCallback() : identity,
                                     kwargs...) where {T}
-    # TODO mixing=LdosMixing(; adjust_temperature=UseScfTemperature()) would be a better
-    #      default in theory, but does not work out of the box, so not done for now
-    # TODO Debug why and enable LdosMixing by default
+    # TODO: mixing=LdosMixing() would be a better default in theory, but it is not yet clear
+    #       how accurate and efficient it is, so we don't disable it by default for now.
     if !(mixing isa SimpleMixing || mixing isa KerkerMixing || mixing isa KerkerDosMixing)
         @warn("solve_ΩplusK_split has only been tested with one of SimpleMixing, " *
               "KerkerMixing or KerkerDosMixing")
@@ -268,39 +289,36 @@ Input parameters:
     #          =  χ04P (-1 + E K2P (1 - χ02P K2P)^-1 R (-χ04P))
     # where χ02P = R χ04P E and K2P = R K E
     basis = ham.basis
-    @assert size(rhs[1]) == size(ψ[1])  # Assume the same number of bands in ψ and rhs
+    @assert size(δHextψ[1]) == size(ψ[1])
     start_ns = time_ns()
-
-    # TODO Better initial guess handling. Especially between the last iteration of the GMRES
-    #      and the concluding Sternheimer solve we should be able to benefit from passing
-    #      around the orbitals
 
     # TODO Use tol_density=tol/10 to make sure that the density is very accurate.
     #      This is likely overdoing it and we should investigate if a smaller
     #      value also does the trick.
 
     # compute δρ0 (ignoring interactions)
-    δρ0 = let  # Make sure memory owned by res0 is freed
-        res0 = apply_χ0_4P(ham, ψ, occupation, εF, eigenvalues, -rhs;
+    δρ0, δψ0 = let  # Make sure memory owned by res0 is freed
+        res0 = apply_χ0_4P(ham, ψ, occupation, εF, eigenvalues, δHextψ;
+                           δtemperature,
                            maxiter=maxiter_sternheimer, tol=tol * factor_initial,
                            bandtolalg, occupation_threshold,
-                           q, kwargs...)  # = -χ04P * rhs
-        callback((; stage=:noninteracting, runtime_ns=time_ns() - start_ns,
-                    Axinfos=[(; basis, tol=tol*factor_initial, res0...)]))
-        compute_δρ(basis, ψ, res0.δψ, occupation, res0.δoccupation;
-                   occupation_threshold, q)
+                           q, kwargs...)  # = χ04P * δHext
+        callback((; stage=:noninteracting, runtime_ns=time_ns() - start_ns, basis,
+                    Axinfos=[(; tol=tol*factor_initial, res0...)]))
+        (compute_δρ(basis, ψ, res0.δψ, occupation, res0.δoccupation;
+                    occupation_threshold, q), res0.δψ)
     end
 
     # compute total δρ
     # TODO Can be smarter here, e.g. use mixing to come up with initial guess.
-    ε = DielectricAdjoint(ham, ρ, ψ, occupation, εF, eigenvalues, occupation_threshold,
-                          bandtolalg, maxiter_sternheimer, q)
+    ε_adj = DielectricAdjoint(ham, ρ, ψ, occupation, εF, eigenvalues, occupation_threshold,
+                              bandtolalg, maxiter_sternheimer, q)
     precon = FunctionPreconditioner() do Pδρ, δρ
         Pδρ .= vec(mix_density(mixing, basis, reshape(δρ, size(ρ));
                                ham, basis, ρin=ρ, εF, eigenvalues, ψ))
     end
-    callback_inner(info) = callback(merge(info, (; runtime_ns=time_ns() - start_ns)))
-    info_gmres = inexact_gmres(ε, vec(δρ0);
+    callback_inner(info) = callback(merge(info, (; runtime_ns=time_ns() - start_ns, basis=basis)))
+    info_gmres = inexact_gmres(ε_adj, vec(δρ0);
                                tol, precon, krylovdim, maxiter, s,
                                callback=callback_inner, kwargs...)
     δρ = reshape(info_gmres.x, size(ρ))
@@ -308,44 +326,65 @@ Input parameters:
         @warn "Solve_ΩplusK_split solver not converged"
     end
 
-    # Compute total change in Hamiltonian applied to ψ
+    # Now we got δρ, but we're not done yet, because we want the full output of the four-point apply_χ0_4P,
+    # so we redo an apply_χ0_4P
+
+    # Induced potential variation
     δVind = apply_kernel(basis, δρ; ρ, q)  # Change in potential induced by δρ
 
+    # Total variation δHtot ψ
     # For phonon calculations, assemble
     #   δHψ_k = δV_{q} · ψ_{k-q}.
-    δHψ = multiply_ψ_by_blochwave(basis, ψ, δVind, q) .- rhs
-
-    # Compute total change in eigenvalues
-    δeigenvalues = map(ψ, δHψ) do ψk, δHψk
-        map(eachcol(ψk), eachcol(δHψk)) do ψnk, δHψnk
-            real(dot(ψnk, δHψnk))  # δε_{nk} = <ψnk | δH | ψnk>
-        end
-    end
+    δHtotψ = multiply_ψ_by_blochwave(basis, ψ, δVind, q) .+ δHextψ
 
     # Compute final orbital response
     # TODO Here we just use what DFTK did before the inexact Krylov business, namely
     #      a fixed Sternheimer tolerance of tol / 10. There are probably
     #      smarter things one could do here
-    resfinal = apply_χ0_4P(ham, ψ, occupation, εF, eigenvalues, δHψ;
+    resfinal = apply_χ0_4P(ham, ψ, occupation, εF, eigenvalues, δHtotψ;
+                           δtemperature,
                            maxiter=maxiter_sternheimer, tol=tol * factor_final,
-                           bandtolalg, occupation_threshold, q, kwargs...)
-    callback((; stage=:final, runtime_ns=time_ns() - start_ns,
-                Axinfos=[(; basis, tol=tol*factor_final, resfinal...)]))
+                           bandtolalg, occupation_threshold, q, δψ0, kwargs...)
+    callback((; stage=:final, runtime_ns=time_ns() - start_ns, basis,
+                Axinfos=[(; tol=tol*factor_final, resfinal...)]))
+    # Compute total change in eigenvalues
+    δeigenvalues = map(ψ, δHtotψ) do ψk, δHtotψk
+        map(eachcol(ψk), eachcol(δHtotψk)) do ψnk, δHtotψnk
+            real(dot(ψnk, δHtotψnk))  # δε_{nk} = <ψnk | δHtot | ψnk>
+        end
+    end
 
-    (; resfinal.δψ, δρ, δHψ, δVind, δρ0, δeigenvalues, resfinal.δoccupation,
-       resfinal.δεF, ε, info_gmres)
+    (; resfinal.δψ, δρ, δHtotψ, δVind, δρ0, δeigenvalues, resfinal.δoccupation,
+       resfinal.δεF, ε_adj, info_gmres)
 end
 
-function solve_ΩplusK_split(scfres::NamedTuple, rhs; kwargs...)
-    if (scfres.mixing isa KerkerMixing || scfres.mixing isa KerkerDosMixing)
-        mixing = scfres.mixing
-    else
-        mixing = SimpleMixing()
-    end
+function solve_ΩplusK_split(scfres::NamedTuple, δHextψ; kwargs...)
     solve_ΩplusK_split(scfres.ham, scfres.ρ, scfres.ψ, scfres.occupation,
-                       scfres.εF, scfres.eigenvalues, rhs;
-                       scfres.occupation_threshold, mixing,
+                       scfres.εF, scfres.eigenvalues, δHextψ;
+                       scfres.occupation_threshold, scfres.mixing,
                        bandtolalg=BandtolBalanced(scfres), kwargs...)
+end
+
+function solve_ΩplusK_split(scfres::NamedTuple, response::ResponseOptions, δHextψ; kwargs...)
+    if isnothing(response.mixing)
+        if (scfres.mixing isa KerkerMixing || scfres.mixing isa KerkerDosMixing)
+            mixing = scfres.mixing
+        else
+            # TODO: LdosMixing works, but accuracy and performance has not been fully
+            #       checked to enable it by default.
+            mixing = SimpleMixing()
+        end
+    else
+        mixing = response.mixing
+    end
+
+    tol = @something response.tol last(scfres.history_Δρ)
+    solve_ΩplusK_split(scfres.ham, scfres.ρ, scfres.ψ, scfres.occupation,
+                       scfres.εF, scfres.eigenvalues, δHextψ;
+                       scfres.occupation_threshold, mixing,
+                       bandtolalg=BandtolBalanced(scfres), tol,
+                       response.verbose, response.krylovdim, response.s,
+                       kwargs...)
 end
 
 struct DielectricAdjoint{Tρ, Tψ, Toccupation, TεF, Teigenvalues, Tq}
@@ -362,26 +401,27 @@ struct DielectricAdjoint{Tρ, Tψ, Toccupation, TεF, Teigenvalues, Tq}
 end
 
 @doc raw"""
-Representation of the dielectric adjoint operator ``ε^† = (1 - χ_0 K)^{-1}``.
+Representation of the dielectric adjoint operator ``ε^† = (1 - χ_0 K)``.
+This is the adjoint of the dielectric operator ``ε = (1 - K χ_0)``.
 """
 function DielectricAdjoint(scfres; bandtolalg=BandtolBalanced(scfres), q=zero(Vec3{Float64}), maxiter=100)
     DielectricAdjoint(scfres.ham, scfres.ρ, scfres.ψ, scfres.occupation, scfres.εF,
                       scfres.eigenvalues, scfres.occupation_threshold, bandtolalg, maxiter, q)
 end
-@timing "DielectricAdjoint" function mul_approximate(ε::DielectricAdjoint, δρ; rtol=0.0, kwargs...)
-    δρ = reshape(δρ, size(ε.ρ))
-    basis = ε.ham.basis
-    δV = apply_kernel(basis, δρ; ε.ρ, ε.q)
-    res = apply_χ0(ε.ham, ε.ψ, ε.occupation, ε.εF, ε.eigenvalues, δV;
-                   miniter=1, ε.occupation_threshold, tol=rtol*norm(δρ),
-                   ε.bandtolalg, ε.q, ε.maxiter, kwargs...)
+@timing "DielectricAdjoint" function mul_approximate(ε_adj::DielectricAdjoint, δρ; rtol=0.0, kwargs...)
+    δρ = reshape(δρ, size(ε_adj.ρ))
+    basis = ε_adj.ham.basis
+    δV = apply_kernel(basis, δρ; ε_adj.ρ, ε_adj.q)
+    res = apply_χ0(ε_adj.ham, ε_adj.ψ, ε_adj.occupation, ε_adj.εF, ε_adj.eigenvalues, δV;
+                   miniter=1, ε_adj.occupation_threshold, tol=rtol*norm(δρ),
+                   ε_adj.bandtolalg, ε_adj.q, ε_adj.maxiter, kwargs...)
     χ0δV = res.δρ
-    Ax = vec(δρ - χ0δV)  # (1 - χ0 K δρ)
-    (; Ax, info=(; rtol, basis, res...))
+    Ax = vec(δρ - χ0δV)  # (1 - χ0 K) δρ
+    (; Ax, info=(; rtol, res...))
 end
-function size(ε::DielectricAdjoint, i::Integer)
+function Base.size(ε_adj::DielectricAdjoint, i::Integer)
     if 1 ≤ i ≤ 2
-        return prod(size(ε.ρ))
+        return prod(size(ε_adj.ρ))
     else
         return one(i)
     end

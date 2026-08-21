@@ -80,7 +80,8 @@ println("Polarizability :   $polarizability")
 ## `δVext` is the potential from a uniform field interacting with the dielectric dipole
 ## of the density.
 δVext = [-(r[1] - a/2) for r in r_vectors_cart(basis)]
-δVext = cat(δVext; dims=4)
+δVext = cat(δVext; dims=4);
+nothing  # hide
 
 # Then:
 # ```math
@@ -105,7 +106,8 @@ println("Polarizability :   $polarizability")
 
 ## Multiply δVext times the Bloch waves, then solve the Dyson equation:
 δVψ = DFTK.multiply_ψ_by_blochwave(scfres.basis, scfres.ψ, δVext)
-res = DFTK.solve_ΩplusK_split(scfres, -δVψ; verbose=true)
+res = DFTK.solve_ΩplusK_split(scfres, δVψ; verbose=true);
+nothing  # hide
 
 # From the result of `solve_ΩplusK_split` we can easily compute the polarisabilities:
 

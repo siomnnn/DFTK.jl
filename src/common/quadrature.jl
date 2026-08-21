@@ -38,9 +38,9 @@ point `i` (not necessarily in order).
 """
 simpson
 @inbounds function simpson(integrand, x::AbstractVector)
-    n = length(x)
-    n <= 4 && return trapezoidal(integrand, x)
-    if (x[2] - x[1]) ≈ (x[3] - x[2])
+    if length(x) <= 4
+        trapezoidal(integrand, x)
+    elseif (x[2] - x[1]) ≈ (x[3] - x[2])
         simpson_uniform(integrand, x)
     else
         simpson_nonuniform(integrand, x)
@@ -58,28 +58,32 @@ simpson(y::AbstractVector, x::AbstractVector) = simpson((i, xi) -> y[i], x)
     n = length(x)
     n_intervals = n - 1
 
-    istop = isodd(n_intervals) ? n - 1 : n - 2
+    istop = isodd(n_intervals) ? n - 2 : n - 1
 
     I = 1 / 3 * dx * integrand(1, x[1])
     # Note: We used @turbo here before, but actually the allocation overhead
     #       needed to get all the data into an array is worse than what one gains
     #       with LoopVectorization
-    @fastmath @simd for i = 2:2:istop
-        I += @inline 4 / 3 * dx * integrand(i, x[i])
-    end
-    @fastmath @simd for i = 3:2:istop
-        I += @inline 2 / 3 * dx * integrand(i, x[i])
+    weven = 4 / 3 * dx
+    wodd = 2 / 3 * dx
+    @fastmath @simd for i = 2:istop
+        @inline I += iseven(i) ? weven * integrand(i, x[i]) : wodd * integrand(i, x[i])
     end
 
     if isodd(n_intervals)
-        I += 5 / 6 * dx * integrand(n-1, x[n-1])
-        I += 1 / 2 * dx * integrand(n, x[n])
+        # Adapted from nonuniform case below
+        I += 5 / 12 * dx * integrand(n, x[n])
+        # 1/3 to finish the second to last interval + 2/3 correction for the last interval
+        I += dx * integrand(n-1, x[n-1])
+        I -= 1 / 12 * dx * integrand(n-2, x[n-2])
     else
         I += 1 / 3 * dx * integrand(n, x[n])
     end
     return I
 end
 
+# See https://en.wikipedia.org/wiki/Simpson%27s_rule#Composite_Simpson's_rule_for_irregularly_spaced_data
+# especially for the odd number of intervals case.
 @inbounds function simpson_nonuniform(integrand, x::AbstractVector)
     n = length(x)
     n_intervals = n-1
@@ -109,4 +113,17 @@ end
     end
 
     return I
+end
+
+"""
+Return the approproate integration function given a PSP quadrature
+"""
+function default_psp_quadrature(x::AbstractArray)
+    if length(x) <= 4
+        trapezoidal
+    elseif (x[2] - x[1]) ≈ (x[3] - x[2])
+        simpson_uniform
+    else
+        simpson_nonuniform
+    end
 end

@@ -1,19 +1,20 @@
 # # Using DFTK on GPUs
 #
-# In this example we will look how DFTK can be used on
+# In this example we will look at how DFTK can be used on
 # Graphics Processing Units.
-# In its current state runs based on Nvidia GPUs
+# In its current state, runs based on Nvidia GPUs
 # using the [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl) Julia
-# package are better supported and there are considerably less rough
-# edges.
+# package are better supported. Running on AMD GPUs is also possible 
+# with the [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl) package,
+# albeit with lower performance.
 #
 # !!! info "GPU parallelism not supported everywhere"
-#     GPU support is still a relatively new feature in DFTK.
-#     While basic SCF computations and e.g. forces are supported,
-#     this is not yet the case for all parts of the code.
-#     In most cases there is no intrinsic limitation and typically it only takes
-#     minor code modification to make it work on GPUs.
-#     If you require GPU support in one of our routines, where this is not
+#     Not all features of DFTK are ported to the GPU. As of August 2026, 
+#     SCF, forces, stresses, and response calculations are supported with 
+#     all standard Libxc functionals (at LDA, GGA and mGGA level).
+#     In most cases there is no intrinsic limitation, and it typically only takes
+#     minor code modifications to make it work on GPUs (and some extra work for 
+#     optimization). If you require GPU support in one of our routines, where this is not
 #     yet supported, feel free to open an issue on github or otherwise get in touch.
 #
 
@@ -21,7 +22,7 @@ using AtomsBuilder
 using DFTK
 using PseudoPotentialData
 
-# **Model setup.** First step is to setup a [`Model`](@ref) in DFTK.
+# **Model setup.** First step is to set up a [`Model`](@ref) in DFTK.
 # This proceeds exactly as in the standard CPU case
 # (see also our [Tutorial](@ref)).
 
@@ -38,10 +39,10 @@ nothing  # hide
 #
 # **Nvidia GPUs.**
 # Supported via [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl).
-# Right now `Libxc` only supports CUDA 11,
-# so we need to explicitly request the 11.8 CUDA runtime:
+# If you install the CUDA package, all required Nvidia cuda libraries
+# will be automatically downloaded. So literally, the only thing
+# you have to do is:
 using CUDA
-CUDA.set_runtime_version!(v"11.8")  # Note: This requires a restart of Julia
 architecture = DFTK.GPU(CuArray)
 
 # **AMD GPUs.** Supported via [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl).
@@ -71,8 +72,9 @@ scfres = self_consistent_field(basis; tol=1e-6)
 compute_forces(scfres)
 
 # !!! warning "GPU performance"
-#     Our current (February 2025) benchmarks show DFTK to have reasonable performance
-#     on Nvidia / CUDA GPUs with a 50-fold to 100-fold speed-up over single-threaded
-#     CPU execution. However, support on AMD GPUs has been less benchmarked and
-#     there are likely rough edges. Overall this feature is relatively new
-#     and we appreciate any experience reports or bug reports.
+#     Our current (August 2025) benchmarks show DFTK to have reasonable performance
+#     on Nvidia / CUDA GPUs with up to a 100-fold speed-up over single-threaded
+#     CPU execution (SCF + forces). A lot of work has been done to stabilize
+#     the AMDGPU implementation as well, but performance is typically lower 
+#     (~20x speedup). There may still be rough edges, and we would appreciate
+#     experience or bug reports.

@@ -7,17 +7,22 @@ using LinearAlgebra
 using PseudoPotentialData
 using Test
 
+
+function weighted_kdot(basis::PlaneWaveBasis, ϕ, ψ)
+    DFTK.weighted_ksum(basis, [dot(ϕk, ψk) for (ϕk, ψk) in zip(ϕ, ψ)])
+end
+
 function setup_quantities(testcase)
     model = model_DFT(testcase.lattice, testcase.atoms, testcase.positions;
                       functionals=[:lda_xc_teter93])
-    basis = PlaneWaveBasis(model; Ecut=3, kgrid=(3, 3, 3), fft_size=[9, 9, 9])
+    basis = PlaneWaveBasis(model; Ecut=3, kgrid=(3, 3, 3))
     scfres = self_consistent_field(basis; tol=10)
 
     ψ, occupation = select_occupied_orbitals(basis, scfres.ψ, scfres.occupation)
 
     ρ = compute_density(basis, ψ, occupation)
     rhs = compute_projected_gradient(basis, ψ, occupation)
-    ϕ = rhs + ψ
+    ϕ = DFTK.random_orbitals(basis, size(ψ[1], 2))
 
     (; scfres, basis, ψ, occupation, ρ, rhs, ϕ)
 end
@@ -25,7 +30,7 @@ end
 function test_solve_ΩplusK(scfres, δVext)
     # Compute a reference solution
     δHψ = DFTK.multiply_ψ_by_blochwave(scfres.basis, scfres.ψ, δVext)
-    ref = DFTK.solve_ΩplusK_split(scfres, -δHψ; verbose=true, s=1.0, tol=1e-12,
+    ref = DFTK.solve_ΩplusK_split(scfres, δHψ; verbose=true, s=1.0, tol=1e-12,
                                   bandtolalg=1e-6 * DFTK.BandtolGuaranteed(scfres))
     δρ0 = apply_χ0(scfres, δVext, tol=1e-13).δρ
 
@@ -33,14 +38,14 @@ function test_solve_ΩplusK(scfres, δVext)
         @test maximum(abs, δρ0 - ref.δρ0) < 1e-11
     end
     @testset "Residual is small" begin
-        ε = DFTK.DielectricAdjoint(scfres; bandtolalg=DFTK.BandtolGuaranteed(scfres))
-        εδρ = reshape(DFTK.mul_approximate(ε, ref.δρ; tol=1e-13).Ax, size(δρ0))
-        @test maximum(abs, δρ0 - εδρ) < 1e-11
+        ε_adj = DFTK.DielectricAdjoint(scfres; bandtolalg=DFTK.BandtolGuaranteed(scfres))
+        ε_adj_δρ = reshape(DFTK.mul_approximate(ε_adj, ref.δρ; tol=1e-13).Ax, size(δρ0))
+        @test maximum(abs, δρ0 - ε_adj_δρ) < 1e-11
     end
 
     @testset "Adaptive algorithm yields desired tolerances" begin
         for tol in (1e-3, 1e-6, 1e-8, 1e-10)
-            res = DFTK.solve_ΩplusK_split(scfres, -δHψ; tol, verbose=false)
+            res = DFTK.solve_ΩplusK_split(scfres, δHψ; tol, verbose=false)
             @test maximum(abs, res.δρ - ref.δρ) < tol
 
             for ik in 1:length(scfres.basis.kpoints)
@@ -51,7 +56,7 @@ function test_solve_ΩplusK(scfres, δVext)
 
     @testset "Try very large value for s" begin
         tol = 1e-8
-        res = DFTK.solve_ΩplusK_split(scfres, -δHψ; tol, s=10^5, verbose=false)
+        res = DFTK.solve_ΩplusK_split(scfres, δHψ; tol, s=10^5, verbose=false)
         @test maximum(abs, res.δρ - ref.δρ) < tol
 
         for ik in 1:length(scfres.basis.kpoints)
@@ -101,8 +106,8 @@ end
     (; basis, ψ, occupation, rhs, ϕ) = Hessian.setup_quantities(TestCases.silicon)
 
     @test isapprox(
-        real(dot(ϕ, solve_ΩplusK(basis, ψ, rhs, occupation).δψ)),
-        real(dot(solve_ΩplusK(basis, ψ, ϕ, occupation).δψ, rhs)),
+        real(Hessian.weighted_kdot(basis, ϕ, solve_ΩplusK(basis, ψ, rhs, occupation).δψ)),
+        real(Hessian.weighted_kdot(basis, solve_ΩplusK(basis, ψ, ϕ, occupation).δψ, rhs)),
         atol=1e-7
     )
 end
@@ -120,9 +125,9 @@ end
 
     # Ω is complex-linear and so self-adjoint as a complex operator.
     @test isapprox(
-        dot(ϕ, apply_Ω(rhs, ψ, H, Λ)),
-        dot(apply_Ω(ϕ, ψ, H, Λ), rhs),
-        atol=1e-7
+        Hessian.weighted_kdot(basis, ϕ, apply_Ω(rhs, ψ, H, Λ)),
+        Hessian.weighted_kdot(basis, apply_Ω(ϕ, ψ, H, Λ), rhs),
+        atol=1e-14
     )
 end
 
@@ -135,13 +140,13 @@ end
     # K involves conjugates and is only a real-linear operator,
     # hence we test using the real dot product.
     @test isapprox(
-        real(dot(ϕ, apply_K(basis, rhs, ψ, ρ, occupation))),
-        real(dot(apply_K(basis, ϕ, ψ, ρ, occupation), rhs)),
-        atol=1e-7
+        real(Hessian.weighted_kdot(basis, ϕ, apply_K(basis, rhs, ψ, ρ, occupation))),
+        real(Hessian.weighted_kdot(basis, apply_K(basis, ϕ, ψ, ρ, occupation), rhs)),
+        atol=1e-14
     )
 end
 
-@testitem "ΩplusK_split, 0K" tags=[:dont_test_mpi] setup=[TestCases] begin
+@testitem "ΩplusK_split, 0K" tags=[:dont_test_mpi] setup=[Hessian, TestCases] begin
     using DFTK
     using DFTK: compute_projected_gradient
     using DFTK: select_occupied_orbitals, solve_ΩplusK, solve_ΩplusK_split
@@ -150,16 +155,18 @@ end
 
     model = model_DFT(silicon.lattice, silicon.atoms, silicon.positions;
                       functionals=[:lda_xc_teter93])
-    basis = PlaneWaveBasis(model; Ecut=3, kgrid=(3, 3, 3), fft_size=[9, 9, 9])
+    basis = PlaneWaveBasis(model; Ecut=3, kgrid=(3, 3, 3))
     scfres = self_consistent_field(basis; tol=10)
 
     rhs = compute_projected_gradient(basis, scfres.ψ, scfres.occupation)
-    ϕ = rhs + scfres.ψ
+    ϕ = DFTK.random_orbitals(basis, size(scfres.ψ[1], 2))
 
     @testset "self-adjointness of solve_ΩplusK_split" begin
-        @test isapprox(real(dot(ϕ, solve_ΩplusK_split(scfres, rhs).δψ)),
-                       real(dot(solve_ΩplusK_split(scfres, ϕ).δψ, rhs)),
-                       atol=1e-7)
+        @test isapprox(
+            real(Hessian.weighted_kdot(basis, ϕ, solve_ΩplusK_split(scfres, rhs).δψ)),
+            real(Hessian.weighted_kdot(basis, solve_ΩplusK_split(scfres, ϕ).δψ, rhs)),
+            atol=1e-7
+        )
     end
 
     @testset "solve_ΩplusK_split agrees with solve_ΩplusK" begin
@@ -181,18 +188,20 @@ end
 
     model = model_DFT(magnesium.lattice, magnesium.atoms, magnesium.positions;
                       functionals=[:lda_xc_teter93], magnesium.temperature)
-    basis = PlaneWaveBasis(model; Ecut=5, kgrid=(3, 3, 3), fft_size=[9, 9, 9])
+    basis = PlaneWaveBasis(model; Ecut=5, kgrid=(3, 3, 3))
     nbandsalg = AdaptiveBands(basis.model; occupation_threshold=1e-10)
     scfres = self_consistent_field(basis; tol=1e-12, nbandsalg)
 
     ψ = scfres.ψ
     rhs = compute_projected_gradient(basis, scfres.ψ, scfres.occupation)
-    ϕ = rhs + ψ
+    ϕ = DFTK.random_orbitals(basis, size(ψ[1], 2))
 
     @testset "self-adjointness of solve_ΩplusK_split" begin
-        @test isapprox(real(dot(ϕ, solve_ΩplusK_split(scfres, rhs).δψ)),
-                        real(dot(solve_ΩplusK_split(scfres, ϕ).δψ, rhs)),
-                        atol=1e-7)
+        @test isapprox(
+            real(Hessian.weighted_kdot(basis, ϕ, solve_ΩplusK_split(scfres, -rhs).δψ)),
+            real(Hessian.weighted_kdot(basis, solve_ΩplusK_split(scfres, -ϕ).δψ, rhs)),
+            atol=1e-7
+        )
     end
 end
 

@@ -11,19 +11,21 @@ It is possible to ask only for occupations higher than a certain level to be com
 using an optional `occupation_threshold`. By default all occupation numbers are considered.
 """
 @views @timing function compute_density(basis::PlaneWaveBasis{T,VT}, ψ, occupation;
-                                        occupation_threshold=zero(T)) where {T,VT}
-    Tρ = promote_type(T,  real(eltype(ψ[1])))
-    Tψ = promote_type(VT, real(eltype(ψ[1])))
-    # Note, that we special-case Tψ, since when T is Dual and eltype(ψ[1]) is not
-    # (e.g. stress calculation), then only the normalisation factor introduces
-    # dual numbers, but not yet the FFT
-
+                                        occupation_threshold=zero(T), label=:ρ) where {T,VT}
     # Occupation should be on the CPU as we are going to be doing scalar indexing.
     occupation = [to_cpu(oc) for oc in occupation]
     mask_occ = [findall(occnk -> abs(occnk) ≥ occupation_threshold, occk)
                 for occk in occupation]
 
     function allocate_local_storage()
+        # The types were moved inside here to avoid a type instability,
+        # as it seems that captures over types do not get specialized!
+        Tρ = promote_type(T,  real(eltype(ψ[1])))
+        # Note, that we special-case Tψ, since when T is Dual and eltype(ψ[1]) is not
+        # (e.g. stress calculation), then only the normalisation factor introduces
+        # dual numbers, but not yet the FFT
+        Tψ = promote_type(VT, real(eltype(ψ[1])))
+
         (; ρ=zeros_like(G_vectors(basis), Tρ, basis.fft_size..., basis.model.n_spin_components),
          ψnk_real=zeros_like(G_vectors(basis), complex(Tψ), basis.fft_size...))
     end
@@ -38,19 +40,20 @@ using an optional `occupation_threshold`. By default all occupation numbers are 
                                           .* (basis.fft_grid.ifft_normalization)^2
                                           .* abs2.(storage.ψnk_real))
 
-        synchronize_device(basis.architecture)
     end
-    ρ = sum(getfield.(storages, :ρ))
+    ρ = sum(storage -> storage.ρ, storages)
 
     mpi_sum!(ρ, basis.comm_kpts)
-    ρ = symmetrize_ρ(basis, ρ; do_lowpass=false)
+    ρ = symmetrize_ρ(basis, ρ)
 
     # There can always be small negative densities, e.g. due to numerical fluctuations
     # in a vacuum region, so put some tolerance even if occupation_threshold == 0
     negtol = max(sqrt(eps(T)), 10occupation_threshold)
-    minimum(ρ) < -negtol && @warn("Negative ρ detected", min_ρ=minimum(ρ))
+    if mpi_master(basis.comm_kpts)
+        minimum(ρ) < -negtol && @warn("Negative $label detected", min_ρ=minimum(ρ))
+    end
 
-    ρ::AbstractArray{Tρ, 4}
+    ρ
 end
 
 @views @timing function compute_density(basis::FiniteElementBasis{T,VT}, ψ, occupation;
@@ -122,38 +125,64 @@ end
         (ik, n) = kn
 
         kpt = basis.kpoints[ik]
-        ifft!(storage.ψnk_real, basis, kpt, ψ[ik][:, n])
+        ifft!(storage.ψnk_real, basis, kpt, ψ[ik][:, n]; normalize=false)
         # … and then we compute the real Fourier transform in the adequate basis.
-        ifft!(storage.δψnk_real, basis, δψ_plus_k[ik].kpt, δψ_plus_k[ik].ψk[:, n])
+        ifft!(storage.δψnk_real, basis, δψ_plus_k[ik].kpt, δψ_plus_k[ik].ψk[:, n]; normalize=false)
+        # use unnormalized plans for extra speed, normalize at the end
+        ifft_normalization = basis.fft_grid.ifft_normalization
 
-        storage.δρ[:, :, :, kpt.spin] .+= real_qzero.(
+        # For the (non-trivial) explanation of why we don't take real parts when q!=0,
+        # see comment in phonon.jl
+        storage.δρ[:, :, :, kpt.spin] .+= ifft_normalization^2 .* real_qzero.(
             2 .* occupation[ik][n]  .* basis.kweights[ik] .* conj.(storage.ψnk_real)
                                                           .* storage.δψnk_real
               .+ δoccupation[ik][n] .* basis.kweights[ik] .* abs2.(storage.ψnk_real))
 
-        synchronize_device(basis.architecture)
     end
     δρ = sum(getfield.(storages, :δρ))
 
     mpi_sum!(δρ, basis.comm_kpts)
-    symmetrize_ρ(basis, δρ; do_lowpass=false)
+    symmetrize_ρ(basis, δρ)
 end
 
 @views @timing function compute_kinetic_energy_density(basis::PlaneWaveBasis, ψ, occupation)
     T = promote_type(eltype(basis), real(eltype(ψ[1])))
     τ = similar(ψ[1], T, (basis.fft_size..., basis.model.n_spin_components))
     τ .= 0
-    dαψnk_real = zeros(complex(eltype(basis)), basis.fft_size)
+    dαψnk_real = zeros_like(G_vectors(basis), complex(eltype(basis)), basis.fft_size...)
+    occupation = [to_cpu(oc) for oc in occupation]
     for (ik, kpt) in enumerate(basis.kpoints)
-        G_plus_k = [[p[α] for p in Gplusk_vectors_cart(basis, kpt)] for α = 1:3]
+        G_plus_k = [map(p -> p[α], Gplusk_vectors_cart(basis, kpt)) for α = 1:3]
         for n = 1:size(ψ[ik], 2), α = 1:3
             ifft!(dαψnk_real, basis, kpt, im .* G_plus_k[α] .* ψ[ik][:, n])
             @. τ[:, :, :, kpt.spin] += occupation[ik][n] * basis.kweights[ik] / 2 * abs2(dαψnk_real)
         end
     end
     mpi_sum!(τ, basis.comm_kpts)
-    symmetrize_ρ(basis, τ; do_lowpass=false)
+    symmetrize_ρ(basis, τ)
 end
+
+"""
+Von Weizsäcker kinetic energy density, which is exact for one-electron systems
+(i.e. if only one spin channels is occupied or both spin channels singly occupied).
+"""
+@timing function von_weizsaecker_kinetic_energy_density(basis::PlaneWaveBasis,
+                                                        ρ::AbstractArray{T};
+                                                        ε_regularization=10eps(T)) where {T}
+    ρ_fourier = fft(basis, ρ)
+    τ = zero(ρ)
+    G = [map(G -> G[α], G_vectors_cart(basis)) for α = 1:3]
+    for σ = 1:basis.model.n_spin_components, α = 1:3
+        ∇ρ_ασ = ifft(basis, im .* G[α] .* @view ρ_fourier[:, :, :, σ])
+        τ[:, :, :, σ] += abs2.(∇ρ_ασ)
+    end
+
+    # The maximum regularises for cases where ρ is small to avoid an Inf or NaN appearing.
+    τ = @. τ / (8max(ρ, ε_regularization))
+
+    τ
+end
+
 
 total_density(ρ) = dropdims(sum(ρ; dims=4); dims=4)
 total_density_FEM(ρ) = dropdims(sum(ρ; dims=2); dims=2)
@@ -173,7 +202,7 @@ end
 end
 
 function ρ_from_total_and_spin(ρtot, ρspin=nothing)
-    if ρspin === nothing
+    if isnothing(ρspin)
         # Val used to ensure inferability
         cat(ρtot; dims=Val(4))  # copy for consistency with other case
     else
@@ -208,4 +237,33 @@ function ρ_from_total(basis::FiniteElementBasis{T}, ρtot::AbstractVector{T}) w
         ρspin = zeros(T, length(ρtot))
     end
     ρ_from_total_and_spin_FEM(ρtot, ρspin)
+end
+#
+# Generalised density representation
+#
+# Many DFT functionals rely on the Hoffmann-Ostenhoff inequality τW(ρ) ≤ τ, i.e. that the
+# von Weizsäcker kinetic energy density is strictly a lower bound to the kinetic energy density.
+# This is satisfied if ρ and τ are built from the same orbitals, but may not be true if we
+# take (convex) combinations of the vector (ρ, τ). This is why we represent the packed
+# density as (ρ, τ_excess) where τ_excess = τ - τW(ρ).
+#
+# TODO: When we do the state refactor we should think how to deal with this;
+#       - Probably a ComponentArray or some form of custom struct is reasonable here
+#       - Do we want to compute the τW implicitly in here ? It's not a very cheap operation
+#         (i.e. not order-1) so that may be unexpected for such an operation. On the other
+#         hand we will probably not get around to have some form of additional computation
+#         that happens upon the construction of these "densities".
+pack_gdensity(basis::PlaneWaveBasis, ρ::AbstractArray, τ::Nothing) = ρ
+pack_gdensity(basis, ρ::AbstractArray, τ::AbstractArray) = cat(ρ, τ; dims=Val(4))
+function split_gdensity(basis::PlaneWaveBasis, x::AbstractArray{T, 4}) where {T}
+    # TODO: This breaks when non-collinear spin is implemented
+    n_spin = basis.model.n_spin_components
+    @assert size(x, 4) == n_spin || size(x, 4) == 2n_spin
+    if size(x, 4) == 2n_spin
+        ρ = @view x[:, :, :,        1:n_spin]
+        τ = @view x[:, :, :, n_spin+1:end   ]
+        (ρ, τ)
+    else
+        (x, nothing)
+    end
 end

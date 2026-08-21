@@ -4,7 +4,7 @@
 # potential in real space on the grid. If the potential is different in the α and β
 # components then it should be a 4d-array with the last axis running over the
 # two spin components.
-abstract type TermLocalPotential <: Term end
+abstract type TermLocalPotential <: TermLinear end
 
 @timing "ene_ops: local" function ene_ops(term::TermLocalPotential,
                                           basis::PlaneWaveBasis{T}, ψ, occupation;
@@ -51,7 +51,7 @@ struct ExternalFromValues
 end
 function (external::ExternalFromValues)(basis::PlaneWaveBasis{T}) where {T}
     # TODO Could do interpolation here
-    @assert size(external.potential_values) == basis.fft_size
+    @assert size(external.potential_values)[1:3] == basis.fft_size
     TermExternal(convert_dual.(T, external.potential_values))
 end
 function (external::ExternalFromValues)(basis::FiniteElementBasis{T}) where {T}
@@ -87,7 +87,6 @@ function (external::ExternalFromFourier)(basis::PlaneWaveBasis{T}) where {T}
     pot_fourier = map(G_vectors_cart(basis)) do G
         convert_dual(complex(T), external.potential(G) / sqrt(unit_cell_volume))
     end
-    enforce_real!(pot_fourier, basis)  # Symmetrize Fourier coeffs to have real iFFT
     TermExternal(irfft(basis, pot_fourier))
 end
 
@@ -104,17 +103,18 @@ function atomic_local_form_factors(basis::AbstractBasis{T}; q=zero(Vec3{T})) whe
         p = norm(G)
         iG2ifnorm_cpu[iG] = get!(norm_indices, p, length(norm_indices) + 1)
     end
+    iG2ifnorm = to_device(basis.architecture, iG2ifnorm_cpu)
 
-    form_factors_cpu = zeros(T, length(norm_indices), length(basis.model.atom_groups))
-    for(p, ifnorm) in norm_indices
-        for (igroup, group) in enumerate(basis.model.atom_groups)
-            element = basis.model.atoms[first(group)]
-            form_factors_cpu[ifnorm, igroup] = local_potential_fourier(element, p)
-        end
+    ni_pairs = collect(pairs(norm_indices))
+    ps = to_device(basis.architecture, first.(ni_pairs))
+    indices = to_device(basis.architecture, last.(ni_pairs))
+
+    form_factors = similar(ps, length(norm_indices), length(basis.model.atom_groups))
+    for (igroup, group) in enumerate(basis.model.atom_groups)
+        element = basis.model.atoms[first(group)]
+        @inbounds form_factors[indices, igroup] .= local_potential_fourier(element, ps)
     end
 
-    form_factors = to_device(basis.architecture, form_factors_cpu)
-    iG2ifnorm = to_device(basis.architecture, iG2ifnorm_cpu)
     (; form_factors, iG2ifnorm)
 end
 
@@ -152,7 +152,6 @@ function compute_local_potential(basis::PlaneWaveBasis{T}; positions=basis.model
 
     pot_fourier = reshape(pot, basis.fft_size)
     if iszero(q)
-        enforce_real!(pot, basis)  # Symmetrize coeffs to have real iFFT
         return irfft(basis, pot_fourier)
     else
         return ifft(basis, pot_fourier)
